@@ -1,0 +1,31 @@
+venv_BldgDFL_python3.11/
+venv_BldgDFL/
+cvxpylayers/
+bash/
+*.out
+.idea/
+output/
+data/optimization_parameters/2007-2021
+data/optimization_parameters/2006-2020/ClusteredDays.csv
+data/optimization_parameters/2006-2020/Clusters13Days.csv
+data/optimization_parameters/2006-2020/Clusters15Days.csv
+data/optimization_parameters/2006-2020/Labels.csv
+data/optimization_parameters/2006-2020/Labels13Days.csv
+data/optimization_parameters/2006-2020/Labels15Days.csv
+data/SmallOffice/Models-final
+data/SmallOffice/Models
+!data/SmallOffice/Models/RC/2025-05-02 10h46m31s
+!data/SmallOffice/Models/NN/NotSparse/NN_1layers_2neurons/2025-02-04 08h52m34s
+!data/SmallOffice/Models/NN/NotSparse/NotSparse/NN_1layers_5neurons/2025-02-04 08h54m53s
+!data/SmallOffice/Models/NN/NotSparse/NN_1layers_10neurons/2025-02-05 10h31m19s
+data/SmallOffice/Figures
+data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_1991-2020/*
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_1991-2020/eplusout.csv
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_1991-2020/eplusout.h5
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_1991-2020/Datasets
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_1991-2020/data.csv
+data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_2006-2020/*
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_2006-2020/eplusout.csv
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_2006-2020/eplusout.h5
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_2006-2020/Datasets
+!data/SmallOffice/Output-6zones_ASHRAE901_OfficeSmall_STD2022_Denver_2006-2020/data.csv
