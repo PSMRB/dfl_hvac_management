@@ -422,76 +422,76 @@ def paper_parameter_sets(n_tasks):
     # get the medoids and labels
     medoids, medoid_labels = get_medoids_and_labels()
     params = [
-        # # test only RC model
-        # {'ems_relax': np.nan, 'gamma': np.nan,
-        #  'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': np.nan,
-        #  'stds': np.nan, 'test_only': True, 'thermal_model': 'rcmodel', 'update_frequency': np.nan,
-        #  'warm_start': np.nan},
-        # # test only NN1 model
-        # {'ems_relax': np.nan, 'gamma': np.nan,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': np.nan,
-        #  'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
-        # # test only NN2 model
-        # {'ems_relax': np.nan, 'gamma': np.nan,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': np.nan,
-        #  'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
-        # # test only NN3 model
-        # {'ems_relax': np.nan, 'gamma': np.nan,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 10, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': np.nan,
-        #  'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
-        # # RC model with QP relaxation
-        # {'ems_relax': 'qp', 'gamma': 0.98,
-        #  'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-2, 'loss_metric': 'hierarchical_weighted_mae',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
-        #  'stds': 0, 'test_only': False, 'thermal_model': 'rcmodel', 'update_frequency': 1, 'warm_start': "True"},
-        # # RC model with SS relaxation
-        # {'ems_relax': 'ss', 'gamma': 0.98,
-        #  'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 2e-2, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
-        #  'stds': 1, 'test_only': False, 'thermal_model': 'rcmodel', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN1 model with QP relaxation
-        # {'ems_relax': 'qp', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': 0,
-        #  'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN1 model with FB relaxation
-        # {'ems_relax': 'fixed_bin', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': 0,
-        #  'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN1 model with SS relaxation
-        # {'ems_relax': 'ss', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 2, 'snr': 0,
-        #  'stds': 0.05, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN2 model with QP relaxation
-        # {'ems_relax': 'qp', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
-        #  'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN2 model with FB relaxation
-        # {'ems_relax': 'fixed_bin', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': 0,
-        #  'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
-        # # NN2 model with SS relaxation
-        # {'ems_relax': 'ss', 'gamma': 0.98,
-        #  'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
-        #          'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'expost+',
-        #  'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 2, 'snr': 0,
-        #  'stds': 0.01, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # test only RC model
+        {'ems_relax': np.nan, 'gamma': np.nan,
+         'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': np.nan,
+         'stds': np.nan, 'test_only': True, 'thermal_model': 'rcmodel', 'update_frequency': np.nan,
+         'warm_start': np.nan},
+        # test only NN1 model
+        {'ems_relax': np.nan, 'gamma': np.nan,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': np.nan,
+         'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
+        # test only NN2 model
+        {'ems_relax': np.nan, 'gamma': np.nan,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': np.nan,
+         'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
+        # test only NN3 model
+        {'ems_relax': np.nan, 'gamma': np.nan,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 10, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': np.nan, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': np.nan,
+         'stds': np.nan, 'test_only': True, 'thermal_model': 'nn', 'update_frequency': np.nan, 'warm_start': np.nan},
+        # RC model with QP relaxation
+        {'ems_relax': 'qp', 'gamma': 0.98,
+         'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-2, 'loss_metric': 'hierarchical_weighted_mae',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
+         'stds': 0, 'test_only': False, 'thermal_model': 'rcmodel', 'update_frequency': 1, 'warm_start': "True"},
+        # RC model with SS relaxation
+        {'ems_relax': 'ss', 'gamma': 0.98,
+         'hpp': {'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 2e-2, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
+         'stds': 1, 'test_only': False, 'thermal_model': 'rcmodel', 'update_frequency': 1, 'warm_start': "True"},
+        # NN1 model with QP relaxation
+        {'ems_relax': 'qp', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': 0,
+         'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # NN1 model with FB relaxation
+        {'ems_relax': 'fixed_bin', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 4, 'snr': 0,
+         'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # NN1 model with SS relaxation
+        {'ems_relax': 'ss', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 2, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 2, 'snr': 0,
+         'stds': 0.05, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # NN2 model with QP relaxation
+        {'ems_relax': 'qp', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 1, 'snr': 0,
+         'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # NN2 model with FB relaxation
+        {'ems_relax': 'fixed_bin', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'hierarchical_weighted_mae',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 0, 'snr': 0,
+         'stds': 0, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
+        # NN2 model with SS relaxation
+        {'ems_relax': 'ss', 'gamma': 0.98,
+         'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 5, 'sparse': False,
+                 'target': 'Zone Mean Air Temperature(t+1)'}, 'learning_rate': 1e-3, 'loss_metric': 'expost+',
+         'medoid_labels': medoid_labels, 'medoids': medoids, 'nb_epochs_max': 100, 'seed': 2, 'snr': 0,
+         'stds': 0.01, 'test_only': False, 'thermal_model': 'nn', 'update_frequency': 1, 'warm_start': "True"},
         # NN3 model with QP relaxation
         {'ems_relax': 'qp', 'gamma': 0.98,
          'hpp': {'activation': 'ReLU()', 'nb_inputs': 11, 'nb_layers': 1, 'nb_neurons': 10, 'sparse': False,
