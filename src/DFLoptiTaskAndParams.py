@@ -72,7 +72,7 @@ def create_parameter_list():
     learning_rates = [2e-3, 2e-2] # [1e-3, 5e-3, 1e-2]
     gamma = 0.98
     update_frequency = 1  # update the weights every x samples
-    # Whether to warm start the NN training as the RC model or not
+    # # Whether to warm start the NN/RC training with the initial model (trained on historical data) or not
     warm_start = "True"  # "Noise" or "True" or "False"
     stds = [0.25, 0.5, 1]  # 0.01, 0.02, 0.03
     test_only_l = [False]  # True, False
