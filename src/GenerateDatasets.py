@@ -13,8 +13,8 @@ This file:
 """
 
 import os
-from library.GenerateDatasets_Library import generate_datasets, get_variable_list
-from library import Common as c
+from src.library.GenerateDatasets_Library import generate_datasets, get_variable_list
+from src.library import Common as c
 
 # call the function on the model using the IWEC weather file
 def main_generate_datasets():

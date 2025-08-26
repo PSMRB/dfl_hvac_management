@@ -5,7 +5,7 @@ import os.path
 from cycler import cycler
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import library.Common as c
+import src.library.Common as c
 import numpy as np
 import pandas as pd
 import scienceplots

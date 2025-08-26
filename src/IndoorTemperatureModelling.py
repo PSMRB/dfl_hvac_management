@@ -6,8 +6,8 @@ $\tau_{b, t+1}^{\rm in} = {\rm FFNN}_{\theta, b}(\tau_{t, b}^{\rm in}, \tau_{t, 
 """
 
 import itertools
-from library.IndoorTemperatureModelling_Library import *
-from library.Plot import correlation_coeff
+from src.library.IndoorTemperatureModelling_Library import *
+from src.library.Plot import correlation_coeff
 import os
 import pandas as pd
 from torch.nn import ReLU, LeakyReLU
