@@ -65,20 +65,19 @@ def twodaysplot(container_df):
 
         fig.show()
 
-def yearlyanalysis(building: c.BuildingModel, meters_column_name_new: list,
+def yearlyanalysis(building, meters_column_name_new: list,
                    folder_path: str, save_fig: bool = False, filename1: str = "HeatingAndCoolingVsWeatherVariables",
                    filename2: str = "HeatingAndCoolingVsIndoorTemperature"):
     """
     Function to analyse the dataset output by Energy+ when performing the yearly simulation. It is used in
     GenerateDatasets.py. It outputs two plots.
 
-    :param final_file: contains the data of the simulation
-    :param meters_column_name_new: list which contains the name of the columns (str) where the electricity consumption
-    for cooling and heating is recorded
-    :param frequency: the frequency of the simulation (generally, "Hourly")
-    :param base_folder_path: the path to the base folder, the Energy+ model we are working with and its setpoint
-    confirguration
+    :param building: the building object (a BuildingModel class object)
+    :param meters_column_name_new: list of the two column names of the heating and cooling electricity meters
+    :param folder_path: the path of the folder where to save the figures
     :param save_fig: Should the figures be saved: True or False ?
+    :param filename1: name of the first figure
+    :param filename2: name of the second figure
     :return:
     """
     dataset = building.simulation

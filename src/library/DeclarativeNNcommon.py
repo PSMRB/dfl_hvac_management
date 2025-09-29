@@ -1,19 +1,17 @@
 import math
 from copy import deepcopy
 import datetime
+import dill as pickle
 import matplotlib.pyplot as plt
 from Cython.Compiler.Pythran import is_type
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 import os
 import pandas as pd
-import pickle
 import torch
 import warnings
 import src.library.Common as c
-from src.library.myomlt.neuralnet.layer import InputLayer
-from src.library.EnergyManagementSystem import EMS
-from src.library.Building import BuildingModel
+
 
 def weighted_mse_loss(input, target, weight):
     """
@@ -25,6 +23,7 @@ def weighted_mse_loss(input, target, weight):
     """
     return (weight * (input - target) ** 2).sum() / weight.sum()
 
+
 def weighted_mae_loss(input, target, weight):
     """
     All inputs are torch.Tensors
@@ -34,6 +33,7 @@ def weighted_mae_loss(input, target, weight):
     :return:
     """
     return (weight * torch.abs(input - target)).sum() / weight.sum()
+
 
 def hierarchical_loss(input, target, loss):
     """
@@ -57,53 +57,6 @@ def hierarchical_loss(input, target, loss):
 
     return floor_losses, loss_bldg
 
-def compute_power_cost(ems, expost_or_expected):
-    """
-    Compute the objective value of the ex-post problem.
-    :param expost_or_expected: a string indicating if the expected or the ex-post results are considered
-    :param with_nd_load: boolean indicating if the non-dispatchable load is considered or not
-    :return: the corrected prices considering the demand charge
-    """
-    nd_load_ttl = pd.Series(0, index=ems.ts_ems[:-1])
-    p_hvac_ttl = pd.Series(0, index=ems.ts_ems[:-1])
-    for b in ems.bldg_assets:
-        nd_load_ttl += b.nd_load.loc[ems.ts_ems[:-1]]
-        if expost_or_expected == "expost":
-            p_hvac_ttl += b.expost_results.loc[:, (slice(None), "P_hvac")].resample(f"{ems.dt_ems}H").sum().sum(
-                axis=1) / 1000
-        elif expost_or_expected == "expected":
-            p_hvac_ttl += b.expected_results.loc[:, (slice(None), "P_hvac")].sum(axis=1)
-    p_import = p_hvac_ttl  # N.B.: in this case, p_import(here) = p_import - p_export in opti
-    if ems.nd_load_flag:
-        p_import += nd_load_ttl
-    max_import_ts = p_import == p_import.max()
-    prices = ems.market.prices_import.loc[ems.ts_ems[:-1]]
-    increased_prices = prices + ems.market.demand_charge
-    corrected_prices = np.where(max_import_ts, increased_prices, prices)
-    obj_value = np.sum(p_import * corrected_prices)
-    return obj_value, corrected_prices
-
-def compute_temperature_penalty(ems, expost_or_expected):
-    """
-    Compute the penalty for the temperature constraint.
-    :param ems:
-    :param expost_or_expected: a string indicating if the expected or the ex-post results are considered
-    :return: the penalty for the temperature constraint
-    """
-    penalty = 0
-    for b in ems.bldg_assets:
-        for z in b.zone_assets:
-            if z.controlled:
-                if expost_or_expected == "expected":
-                    Tin = z.expected_results.loc[:, "Tin"]
-                    Ttgt = z.Ttgt.loc[ems.ts_ems]
-                    ow = z.occupancy_weights
-                elif expost_or_expected == "expost":
-                    Tin = z.expost_results.loc[:, "Tin"]
-                    Ttgt = z.Ttgt.loc[ems.ts_ems].resample(f"{ems.dt_ems}H").interpolate("time")
-                    ow = z.occupancy_weights.resample(f"{ems.dt_ems}H").interpolate("time")
-                penalty += (ow * (Tin - Ttgt) ** 2).sum()
-    return penalty
 
 def compute_losses(ems, solution):
     """
@@ -122,7 +75,7 @@ def compute_losses(ems, solution):
               "weighted_mse_reg": [],
               "error_mu": [], "error_std": [], "mse+mae": [], "mse+weighted_mae": [], "mse+expostcost": [],
               "tin_deviation": []}
-    expost_cost, prices_with_demand_charge = compute_power_cost(ems, "expost")
+    expost_cost, prices_with_demand_charge = ems.compute_power_cost("expost")
     prices_with_demand_charge_ts = torch.tensor(
         prices_with_demand_charge, requires_grad=False, dtype=torch.float)
     expected_dic, expost_dic = {}, {}
@@ -179,6 +132,7 @@ def compute_losses(ems, solution):
           f"Weighted MSE: {average_losses['weighted_mse']:.2f}")
     return average_losses
 
+
 def training_loss(base_loss, medoid_weight: float):
     """
     Build the training loss based on the losses computed by the losses function
@@ -190,6 +144,7 @@ def training_loss(base_loss, medoid_weight: float):
     :return: the training loss
     """
     return medoid_weight * base_loss
+
 
 def get_losses(medoid_weight, loss_metric, ems, solution):
     """
@@ -218,6 +173,7 @@ def get_losses(medoid_weight, loss_metric, ems, solution):
     l["training_loss"] = training_loss(l[loss_metric], l["overall_weight"])
     return l
 
+
 def get_weighted_average_of_losses(losses):
     """
     For a given epoch, compute the weighted average loss. I.e, it weights the loss of each sample by the
@@ -236,6 +192,7 @@ def get_weighted_average_of_losses(losses):
     average_of_weighted_losses = c.agg_itr_of_dict(tmp2, lambda x: x)
     return average_of_weighted_losses
 
+
 def get_max_of_losses(losses):
     """
     For a given epoch, compute the weighted average loss. I.e, it weights the loss of each sample by the
@@ -252,6 +209,7 @@ def get_max_of_losses(losses):
     # transform tmp2 into a dict of list
     max_loss = c.agg_itr_of_dict(tmp2, lambda x: x)
     return max_loss
+
 
 def compute_weighted_average_cost(cost_nested_list, losses_dataset):
     """
@@ -278,287 +236,18 @@ def compute_weighted_average_cost(cost_nested_list, losses_dataset):
         weighted_average_cost.append(np.average(pc_l, weights=ow_np))
     return weighted_average_cost
 
-def get_w_and_b_from_onnx(ems, warm_start, SNR):
-    """
-    Function to get the weights and biases from the onnx file
-    :param ems:
-    :return: two dictionaries containing the weights and biases of the cvxpylayer network with keys =
-            building name and values = dictionary with keys = layer number and values = torch.Tensor
-    """
-    rg = False  # is a gradient needed
-    # SNR = 20**2  # Signal to Noise Ratio
-    nn_weights, nn_biases = {}, {}
-    for b in ems.bldg_assets:
-        # read the nn from onnx
-        layers_onnx = list(b.nn.layers)
-        bn = b.name
-        nn_weights[bn], nn_biases[bn] = {}, {}
-        for l, layer_onnx in enumerate(layers_onnx):
-            if not isinstance(layer_onnx, InputLayer):
-                if warm_start == "True":
-                    # Set the values of the NN parameters from the onnx file IF weights and biases are not provided
-                    nn_weights[bn][l] = torch.tensor(layer_onnx.weights, requires_grad=rg, dtype=torch.float)
-                    nn_biases[bn][l] = torch.tensor(layer_onnx.biases, requires_grad=rg, dtype=torch.float)
-                if warm_start == "False":
-                    nn_weights[bn][l] = torch.rand_like(torch.tensor(layer_onnx.weights, dtype=torch.float),
-                                                        requires_grad=rg)
-                    nn_biases[bn][l] = torch.rand_like(torch.tensor(layer_onnx.biases, dtype=torch.float),
-                                                       requires_grad=rg)
-                elif warm_start == "Noise":
-                    # Set the values of the NN parameters from the onnx file + noise
-                    w = torch.tensor(layer_onnx.weights, requires_grad=rg, dtype=torch.float)
-                    b = torch.tensor(layer_onnx.biases, requires_grad=rg, dtype=torch.float)
-                    # noise is gaussian with std = 10% of the value of the parameter
-                    noise_w = torch.randn_like(w) * w / np.sqrt(SNR)
-                    noise_b = torch.randn_like(b) * b / np.sqrt(SNR)
-                    nn_weights[bn][l] = w + noise_w
-                    nn_biases[bn][l] = b + noise_b
-
-    return nn_weights, nn_biases
-
-def get_w_and_b_from_rc_pkl(ems, warm_start, target_name, SNR):
-    """
-    Function to get the weights and biases from the rc model
-    :param ems:
-    :return:
-    """
-    rg = False  # is a gradient needed
-
-    def float_grad(tensor):
-        # if tensor < 0:
-        #     warnings.warn("Negative value for one of the parameters of the RC model. Absolute value taken.")
-        return tensor.to(torch.float).requires_grad_(rg)
-
-    # SNR = 20**2  # Signal to Noise Ratio
-    nn_weights, nn_biases = {}, {}
-    for b in ems.bldg_assets:
-        bn = b.name
-        nn_weights[bn], nn_biases[bn] = {}, {}
-        rcmodel = b.rcmodel
-        for z_i, zn in enumerate(b.zones_df_no_plenum["name"]):
-            nn_weights[bn][zn] = {}
-            nn_biases[bn][zn] = {}
-            if warm_start == "True":
-                try:  # check if there is alpha (spatial correlation) in the loaded model
-                    nn_weights[bn][zn]["alpha"] = {zzn:
-                                                       float_grad(rcmodel["alpha"][zz_i, z_i])
-                                                   for zz_i, zzn in enumerate(b.zones_df_no_plenum["name"])}
-                except KeyError:  # if no alpha in the loaded model, do not read it
-                    pass
-                nn_weights[bn][zn]["R"] = float_grad(rcmodel["R"][0, z_i])
-                nn_weights[bn][zn]["C"] = float_grad(rcmodel["C"][0, z_i])
-                nn_weights[bn][zn]["h_eff"] = float_grad(rcmodel["heating_efficiency"][0, z_i])
-                nn_weights[bn][zn]["c_eff"] = float_grad(rcmodel["cooling_efficiency"][0, z_i])
-
-            elif warm_start == "False":
-                def rand_like(tensor):
-                    return float_grad(torch.rand_like(tensor))
-
-                def ones_like(tensor):
-                    return float_grad(torch.ones_like(tensor))
-
-                def alpha_like(tensor, target_name):
-                    uniform = rand_like(tensor) / 10
-                    if target_name == "Zone Mean Air Temperature(t+1)":
-                        uniform.masked_fill(torch.diag(torch.ones(uniform.shape[0])).bool(), 1)
-                    return uniform
-
-                try:  # check if there is alpha (spatial correlation) in the loaded model
-                    alpha = alpha_like(rcmodel["alpha"], target_name)
-                    nn_weights[bn][zn]["alpha"] = {zzn: alpha[zz_i, z_i]
-                                                   for zz_i, zzn in enumerate(b.zones_df_no_plenum["name"])}
-                except KeyError:  # if no alpha in the loaded model, do not read it
-                    pass
-                nn_weights[bn][zn]["R"] = rand_like(rcmodel["R"][0, z_i]) * (21 - 5) + 5
-                nn_weights[bn][zn]["C"] = rand_like(rcmodel["C"][0, z_i]) * (21 - 5) + 5
-                nn_weights[bn][zn]["h_eff"] = ones_like(rcmodel["heating_efficiency"][0, z_i])
-                nn_weights[bn][zn]["c_eff"] = ones_like(rcmodel["cooling_efficiency"][0, z_i])
-
-            elif warm_start == "Noise":
-                def noise_like(tensor):
-                    return float_grad(tensor + torch.randn_like(tensor) * tensor / np.sqrt(SNR))
-
-                try:  # check if there is alpha (spatial correlation) in the loaded model
-                    nn_weights[bn][zn]["alpha"] = {zzn: noise_like(rcmodel["alpha"][zz_i, z_i])
-                                                   for zz_i, zzn in enumerate(b.zones_df_no_plenum["name"])}
-                except KeyError:  # if no alpha in the loaded model, do not read it
-                    pass
-                nn_weights[bn][zn]["R"] = noise_like(rcmodel["R"][0, z_i])
-                nn_weights[bn][zn]["C"] = noise_like(rcmodel["C"][0, z_i])
-                nn_weights[bn][zn]["h_eff"] = noise_like(rcmodel["heating_efficiency"][0, z_i])
-                nn_weights[bn][zn]["c_eff"] = noise_like(rcmodel["cooling_efficiency"][0, z_i])
-
-    return nn_weights, nn_biases
-
-def set_ems_time(ems, day_date):
-    T0_date = day_date
-    T0 = pd.Timestamp(T0_date, tz="UTC")  # starting datetime of the simulation
-    # T0 = pd.Timestamp("01/01/2017", tz="UTC")
-    T_ems = 24  # number of hours in the EMS
-    dt_ems = 1  # time step period of the EMS in hour (e.g. 0.25 for 15min)
-    T_sim = 24  # number of hours in the simulation
-    dt_sim = 0.25  # time step period of the simulation in hour (e.g. 0.25 for 15min)
-    ems.set_times(T0, T_ems, dt_ems, T_sim, dt_sim)
-
-def set_ems_market(ems):
-    line_capacity = 1e4  # kW
-    demand_charge = 0.4  # €/kW
-    prices = np.transpose([[*[0.3] * 6, *[0.6] * 13, *[0.3] * 5], [0.2] * 24])[:ems.ts_ems[:-1].shape[0],
-             :]  # €/kWh
-    # prices go from midnight to 11pm
-    elec_prices = pd.DataFrame(prices, index=ems.ts_ems[:-1], columns=["import_price", "export_price"])
-    ems.set_market(demand_charge, elec_prices["import_price"], elec_prices["export_price"], line_capacity)
-
-def build_ems(day_date, thermal_model, paths, now,
-            cvxpy_opti_formulation, relu_relaxation_for_convex_opti,
-              warm_start, hyperparameters, snr):
-    """
-    Build the cvxpy problem of an EMS object using the minimum required information:
-        - the time granularity and date
-        - the building objects
-        - the formulation type (LP or MILP, Rc or NN,...)
-
-    N.B.: the cvxpy problem is formulated but the parameter values are not assigned.
-    """
-    ems = EMS()
-    set_ems_time(ems, day_date)
-
-    ####################################
-    ### Create the BuildingModel object
-    ####################################
-
-    # parameters
-    zone_names = ['Attic', 'Core_ZN', 'Perimeter_ZN_1', 'Perimeter_ZN_2', 'Perimeter_ZN_3',
-                  'Perimeter_ZN_4',
-                  ]
-    floors = [1] * 6
-    zonesandfloors = zip(zone_names, floors)
-    # HVAC system names (in the same order as the zone_names)
-    ACUs = [f"PSZ-AC:{i}" for i in range(1, 6)]
-    acusandfloors = zip(ACUs, [1] * 5)
-
-    # Create building object (and the associated zones)
-    bldg = BuildingModel("6zones_ASHRAE901_OfficeSmall_STD2020_Denver_2006-2020", paths["idf_filepath"],
-                         paths["epw_filepath"], paths["output_folderpath"], zonesandfloors, acusandfloors)
-
-    # load the one-year simulation data
-    bldg.load_simulation(paths["training_data_filepath"], "UTC")
-
-    # set the nondispatchable load
-    nd_load = bldg.simulation["Electricity:Building[Wh]"] / 1000
-    nd_load.name = nd_load.name.replace("[Wh]", "[kWh]")
-    bldg.set_nondispatchable_load(nd_load)
-
-    # set the HVAC system and thermal requirements for each zone
-    for z in bldg.zone_assets:
-        z.set_HVAC(bldg, ems.T0)
-        z.set_occupancy_weights(pd.Series([0.1] * 8 + [1] * 11 + [0.3] * 6, index=ems.ts_ems))
-        z.set_target_temperature(pd.Series(21, index=bldg.simulation.index))
-    # compute the HVAC capacity of each PACU
-    bldg.compute_PACU_capacity()
-
-    ####################################
-    ### Optimization problem
-    ####################################
-
-    # add the building to the EMS, /!\ for several buildings, create a list of buildings and add them with pd.concat
-    ems.bldg_assets.loc[bldg.name] = bldg
-
-    # Create the market conditions
-    set_ems_market(ems)
-
-    # Load thermal model (and build save_folderpath)
-    if thermal_model == "nn":
-        # load the nn model
-        nn_summary_filepath = os.path.abspath("data/SmallOffice/Models/NN/TrainingSummary_NN2.xlsx")
-        NN_datetime = c.getbestmodel(nn_summary_filepath, hyperparameters)
-        NN_tail_filepath = (f"NotSparse/NN_{hyperparameters['nb_layers']}layers_"
-                            f"{hyperparameters['nb_neurons']}neurons/{NN_datetime}")
-        print("Here is the model used: ", NN_tail_filepath)
-        nn_folderpath = os.path.join(os.path.dirname(nn_summary_filepath), NN_tail_filepath)
-        # description of the neural network to be saved
-        nn_description = f"{hyperparameters['nb_layers']}layers_{hyperparameters['nb_neurons']}neurons_each"
-        # load nn model
-        bldg.load_nn(nn_folderpath, nn_description)
-        cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"],
-                                                        os.path.dirname(NN_tail_filepath), now)
-        # get the weights and biases from the onnx model for the first iteration
-        weights, biases = get_w_and_b_from_onnx(ems, warm_start, snr)
-        # Tighten the bounds of the NN
-        for b in ems.bldg_assets.values:
-            # all the inputs are variable (not parameters)
-            is_parameter = [False] * len(bldg.nn_scaled_input_bounds)
-            # all the inputs after 2 * the number of controlled zones are parameters
-            nb_variables = 2 * len(b.controlled_zone_names)
-            is_parameter[nb_variables:] = [True] * len(is_parameter[nb_variables:])
-            b.adjust_bounds(ems.ts_ems, is_parameter)
-
-    elif thermal_model == "rcmodel":
-        # load the rc model
-        rc_summary_filepath = os.path.abspath("data/SmallOffice/Models/RC/summary_RC.xlsx")
-        rc_datetime = c.getbestmodel(rc_summary_filepath, hyperparameters, metric="MAE_24h", sense="min")
-        rc_filepath = os.path.join(os.path.dirname(rc_summary_filepath), rc_datetime, "RCmodel.pth")
-        print("Here is the model used: ", rc_filepath)
-        # load rcmodel
-        bldg.load_rcmodel(rc_filepath)
-        cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"],
-                                                        "RC", now)
-        # get the weights and biases from the onnx model for the first iteration
-        weights, biases = get_w_and_b_from_rc_pkl(ems, warm_start, hyperparameters["target"], snr)
-    elif thermal_model == "spatialrcmodel":
-        # load the rc model
-        rc_summary_filepath = os.path.abspath("data/SmallOffice/Models/spatialRC/summary_spatialRC.xlsx")
-        rc_datetime = c.getbestmodel(rc_summary_filepath, hyperparameters, metric="MAE_24h", sense="min")
-        rc_filepath = os.path.join(os.path.dirname(rc_summary_filepath), rc_datetime, "RCmodel.pth")
-        # load rcmodel
-        bldg.load_rcmodel(rc_filepath)
-        cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"],
-                                                        "spatialRC", now)
-        # get the weights and biases from the onnx model for the first iteration
-        weights, biases = get_w_and_b_from_rc_pkl(ems, warm_start, hyperparameters["target"], snr)
-    else:
-        raise ValueError("The thermal model must be either 'nn' or '(spatial)rcmodel'.")
-    c.createdir(cvxpylayer_model_save_folderpath, up=2)
-
-    # Build the cvxpy formulation in the ems object
-    if cvxpy_opti_formulation is None:
-        if relu_relaxation_for_convex_opti is None:
-            raise ValueError(
-                "Either the relu relaxation ('miqp', 'qp', 'fixed_bin') OR the thermal model ('rcmodel', 'nn')"
-                "must be provided to build the cvxpy formulation.")
-        ems.cvxpy_opti_formulation = ems.build_cvxpy(relu_relaxation_for_convex_opti, thermal_model)
-    else:
-        ems.thermal_model = thermal_model
-        ems.cvxpy_opti_formulation = cvxpy_opti_formulation
-
-    return ems, weights, biases, cvxpylayer_model_save_folderpath
-
-def solve_ems(ems, solver_parameters):
-    # solve the ems
-    ems.solve_cvxpy_gurobi(solver_parameters)
-    # if the problem is feasible: compute and save the expected and ex-post costs
-    if ems.feasible:
-        # compute the expect cost and expected temperature penalty
-        ems.expected_power_cost, _ = compute_power_cost(ems, "expected")
-        ems.expected_temperature_penalty = compute_temperature_penalty(ems, "expected")
-        # simulate the decisions
-        ems.expost_simulation()
-        # compute the ex-post cost and ex-post temperature penalty
-        ems.expost_power_cost, _ = compute_power_cost(ems, "expost")
-        ems.expost_temperature_penalty = compute_temperature_penalty(ems, "expost")
-
 
 def normal_distribution(mean, std):
     """
     Create a normal distribution, sample from it.
     Returns the sample and the distribution.
     """
-    # Create the normal distribution for each parameter
-    param_distrib = torch.distributions.normal.Normal(mean, std)
+    # Create the normal distribution for each parameter (ensure std > 0)
+    param_distrib = torch.distributions.normal.Normal(mean, torch.clamp(std, min=1e-6))
     # Sample from the distribution
     param_sample = param_distrib.sample()
     # Return the sample and the distribution
-    return param_sample.requires_grad_(requires_grad=False), param_distrib
+    return param_sample.detach(), param_distrib
 
 
 def recursive_normal_distribution(param, ds, dd, std):
@@ -570,36 +259,40 @@ def recursive_normal_distribution(param, ds, dd, std):
     :param dd: the dictionary to store the distributions
     """
 
-    for k, v in param.items():
-        if isinstance(v, dict):
-            # If the value is a dictionary, recursively sample the distribution
-            ds[k], dd[k] = {}, {}
-            recursive_normal_distribution(v, ds[k], dd[k], std)
-        else:
-            # If the value is a tensor, sample the distribution
-            ds[k], dd[k] = normal_distribution(v, std)
+    if isinstance(std, (int, float)):
+        for k, v in param.items():
+            if isinstance(v, dict):
+                # If the value is a dictionary, recursively sample the distribution
+                ds[k], dd[k] = {}, {}
+                recursive_normal_distribution(v, ds[k], dd[k], std)
+            else:
+                # If the value is a tensor, sample the distribution
+                ds[k], dd[k] = normal_distribution(v, std)
+    else:  # we assume std has the same structure as param
+        for k, v in param.items():
+            if isinstance(v, dict):
+                # If the value is a dictionary, recursively sample the distribution
+                ds[k], dd[k] = {}, {}
+                recursive_normal_distribution(v, ds[k], dd[k], std[k])
+            else:
+                # If the value is a tensor, sample the distribution
+                ds[k], dd[k] = normal_distribution(v, std[k])
     return ds, dd
 
 
-def wrapper_normal_distribution(param_nn, std, ems):
+def wrapper_normal_distribution(param_nn, std):
     """
     For all the parameters, create a normal distribution around the parameter
+    return:
+        Two tuples with the same structure as param_nn (weights_dic, biases_dic).
+        The first one contains the samples, the second one the distributions.
     """
-
-    param_s_dic = {}  # dictionary of samples
-    param_d_dic = {}  # dictionary of distributions
-    for b in ems.bldg_assets.values:
-        param_s_dic[b.name] = {}
-        param_d_dic[b.name] = {}
-        ds, dd = recursive_normal_distribution(param_nn[b.name], {}, {}, std)
-        for l_nb in param_nn[b.name].keys():
-            param_s_dic[b.name][l_nb], param_d_dic[b.name][l_nb] = ds[l_nb], dd[l_nb]
-        # # For each layer get the layer number and the parameters (as a tensor)
-        # for l_nb, param_l in param_nn[b.name].items():
-        #     # for (spatial) RC models, param_l is a dictionary with the parameters as values
-        #     param_s_dic[b.name][l_nb], param_d_dic[b.name][l_nb] = recursive_normal_distribution(
-        #         param_l, {}, {}, std)
-    return param_s_dic, param_d_dic
+    sd_l = []
+    for u, s in zip(param_nn, std):
+        # get parameter samples and distributions
+        ps, pd = recursive_normal_distribution(u, {}, {}, s)
+        sd_l.append((ps, pd))
+    return tuple(sd_l)
 
 
 def map_weights_and_biaises(f, weights, biases):
@@ -614,6 +307,7 @@ def map_weights_and_biaises(f, weights, biases):
         new_w[bn] = c.map_dict(w, f)
         new_b[bn] = c.map_dict(b, f)
     return new_w, new_b
+
 
 def save_results(summary_filepath, cluster_name, thermodynamics_model_name, ems):
     # Append those results to the summary file
@@ -639,7 +333,8 @@ def save_results(summary_filepath, cluster_name, thermodynamics_model_name, ems)
          ], axis=0)
     summary_df.to_excel(summary_filepath, index=True, header=True)
 
-def paths_dic():
+
+def paths_dic(initial_model_folderpath):
     """
     Function to return the dictionary of paths to the files and folders used in the project.
     Returns: paths
@@ -661,7 +356,8 @@ def paths_dic():
     c.createdir(os.path.dirname(cvxpylayer_results_summary_filepath), up=1)
     c.createdir(cvxpylayer_models_folderpath, up=0)
     
-    return {"cvxpylayer_results_summary_filepath": cvxpylayer_results_summary_filepath,
+    return {"initial_model_folderpath": initial_model_folderpath,
+            "cvxpylayer_results_summary_filepath": cvxpylayer_results_summary_filepath,
             "cvxpylayer_models_folderpath": cvxpylayer_models_folderpath,
             "model_folderpath": model_folderpath,
             "idf_filepath": idf_filepath,
@@ -669,21 +365,26 @@ def paths_dic():
             "training_data_filepath": training_data_filepath,
             "output_folderpath": output_folderpath}
 
+
 def logs(columns, index):
-    # record the weights, biases. They change only during training.
+    """
+    Create the dataframes and dictionaries to log the weights, biases, losses and ems during training.
+    """
+    # dataframe for the weights, biases. They change only during training.
     weights_df = pd.DataFrame(columns=columns, index=index)
     biases_df = pd.DataFrame(columns=columns, index=index)
-    # record losses. Backprop only during training but computed during training, validation and test
+    # dict of dataframe for the losses. Backprop only during training but computed during training, validation and test
     losses_dic = {
         "training": pd.DataFrame(columns=columns, index=index),
         "validation": pd.DataFrame(columns=columns, index=index),
         "test": pd.DataFrame(columns=columns, index=range(1))}
-    # record the ems
+    # dict to record the ems
     ems_dic = {
             "training": pd.DataFrame(columns=columns, index=index),
             "validation": pd.DataFrame(columns=columns, index=index),
             "test": pd.DataFrame(columns=columns, index=range(1))}
     return weights_df, biases_df, losses_dic, ems_dic
+
 
 def get_attr_to_list(ems_df, f):
     """
@@ -693,12 +394,14 @@ def get_attr_to_list(ems_df, f):
     """
     return ems_df.dropna().applymap(f).values.tolist()
 
+
 def get_avg_cost(ems_df, losses_df, f):
     tmp = get_attr_to_list(ems_df, f)
     # remove the infeasible ems (to prevent mismatch when ECOS bugs)
     ems_df_feasible = get_attr_to_list(ems_df, lambda x: x.feasible)
     tmp = [[tt for tt, eff in zip(t, ef) if eff] for t, ef in zip(tmp, ems_df_feasible)]
     return compute_weighted_average_cost(tmp, losses_df)
+
 
 def epoch_plots(ems_dic, losses_df, loss_metric, paths):
     """
@@ -873,7 +576,10 @@ def epoch_plots(ems_dic, losses_df, loss_metric, paths):
     plt.savefig(os.path.join(paths["cvxpylayer_model_save_folderpath"], "NumberInfeasibleSamples"))
     # plt.show()
 
+    plt.close('all')
+
     return mean_val_losses_np
+
 
 def epoch_save(paths, ems_dic, losses_dic, weights_df, biases_df):
     # Save the parameters and the loss values
@@ -892,10 +598,9 @@ def epoch_save(paths, ems_dic, losses_dic, weights_df, biases_df):
     return ems_dic
 
 
-
 def summary_save(dnn, hyperparameters, ems_dic, losses_dic, best_epoch, now, stopwatch_dic, seed, snr, warm_start,
                          ems_relaxation_for_convex_opti, epoch, nb_epochs_max, loss_metric, update_frequency,
-                 std_w, std_b):
+                 std_w, std_b, std_requires_grad, s):
     # If testing has been performed
     if not losses_dic["test"].dropna().empty:
         test_loss = losses_dic["test"].loc[0].apply(lambda x: x["training_loss"]).sum().numpy()
@@ -932,7 +637,7 @@ def summary_save(dnn, hyperparameters, ems_dic, losses_dic, best_epoch, now, sto
             'Best Train Loss': 0,
             'Best Val Loss': 0,
         }
-    else:
+    else:  # there was training and validation
         new_result = {
             'Learning rate': dnn.optimizer.param_groups[0]["lr"],
             'gamma': dnn.scheduler.gamma,
@@ -945,6 +650,7 @@ def summary_save(dnn, hyperparameters, ems_dic, losses_dic, best_epoch, now, sto
             'Best Val Loss': losses_dic["validation"].loc[best_epoch].apply(training_loss_if_feasible).sum().numpy(),
         }
 
+    # In all cases, save the following
     model_carac = f"{hyperparameters['nb_layers']}layers_{hyperparameters['nb_neurons']}neurons_each" \
         if ems.thermal_model == "nn" else ems.thermal_model
     new_result.update({'Date': now,
@@ -954,8 +660,10 @@ def summary_save(dnn, hyperparameters, ems_dic, losses_dic, best_epoch, now, sto
                   'Seed': seed,
                   'SNR': snr,
                   'Warm-start': warm_start,
-                   'Std w': std_w,
-                   'Std b': std_b,
+                  'Std w': str(std_w) if not callable(std_w) else f"1 -> {std_w(1)}",
+                  'Std b': str(std_b) if not callable(std_b) else f"1 -> {std_b(1)}",
+                  'Std requires grad': std_requires_grad,
+                  'S': s,
                   'N_ts': ems.nb_ts_ems,
                   'Nb Epoch': f"{epoch}/{nb_epochs_max}",
                   'Best Epoch': best_epoch,
@@ -972,10 +680,16 @@ def summary_save(dnn, hyperparameters, ems_dic, losses_dic, best_epoch, now, sto
                   'Test Cost Misestimation': test_expost_cost - test_expected_cost,
                   'Test Tin Penalty': test_tin_penalty,
                   })
-    # dump file with pickle
+
     with open(os.path.join(dnn.paths["cvxpylayer_model_save_folderpath"], "summary.pkl"), "wb") as f:
         pickle.dump(new_result, f)
-    # c.save_newline_excel(dnn.paths["cvxpylayer_results_summary_filepath"], new_result)
+
+
+def save_stopwatches(folder_path, stopwatch_dic):
+    # save the stopwatch_dic
+    with open(os.path.join(folder_path, "stopwatch.pkl"), "wb") as f:
+        pickle.dump(stopwatch_dic, f)
+
 
 def any_sample_feasible(ems_s):
     """
@@ -993,8 +707,9 @@ def training_loss_if_feasible(x):
         y = 0
     return y
 
+
 def print_losses(epoch, nb_epochs_max, losses_dic, loss_metric):
-    text = f"Epoch {epoch}/{nb_epochs_max - 1} - "
+    text = f"\n\n*** Epoch {epoch}/{nb_epochs_max - 1} - "
     # Count infeasible samples in training and validation
     infeasible_train = losses_dic["training"].loc[epoch].apply(lambda x: isinstance(x, float)).sum()
     infeasible_val = losses_dic["validation"].loc[epoch].apply(lambda x: isinstance(x, float)).sum()
@@ -1005,7 +720,7 @@ def print_losses(epoch, nb_epochs_max, losses_dic, loss_metric):
     text += f"Nb infeasible validation: {infeasible_val}"
     if infeasible_val == 0:
         text += f" - Validation Loss: {losses_dic['validation'].loc[epoch].apply(lambda x: x[loss_metric]).mean():.2f}"
-    text += "\n************************************************"
+    text += "***"
 
     print(text)
 

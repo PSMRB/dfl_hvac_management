@@ -4,13 +4,30 @@ For all result folders in a given folder, read the summary.pkl files and gather 
 
 import os
 import pandas as pd
-import pickle
+import dill as pickle
+import warnings
 
-def build_summary():
+
+def correct_missing_info(summary):
+    # if missing value in "Std requires grad", fill it with False
+    if "Std requires grad" not in summary:
+        summary["Std requires grad"] = False
+    # if missing value in "S", fill it with 1 if it was a training, 0 if it was an ITO test
+    if "S" not in summary:
+        summary["S"] = 0 if summary["Nb Epoch"] == "0/1" else 1
+
+    return summary
+
+
+def build_summary(cvxpylayer_folderpath=None):
     paths = {}
 
     # cvxpylayer_macpath = os.path.normpath('/Users/pietro/Library/CloudStorage/OneDrive-JohnsHopkins/DFL2_HP_CECI/SmallOffice/Models/cvxpylayer')
-    paths["cvxpylayer"] = os.path.abspath("data/SmallOffice/Models/cvxpylayer")
+    if cvxpylayer_folderpath is not None:
+        paths["cvxpylayer"] = os.path.abspath(cvxpylayer_folderpath)
+    else:
+        paths["cvxpylayer"] = os.path.abspath("data/SmallOffice/Models/cvxpylayer")
+
     paths["RC"] = os.path.join(paths["cvxpylayer"], "RC")
     paths["spatialRC"] = os.path.join(paths["cvxpylayer"], "spatialRC")
     paths["NN1"] = os.path.join(paths["cvxpylayer"], "NotSparse/NN_1layers_2neurons")
@@ -36,6 +53,8 @@ def build_summary():
         if os.path.isfile(summary_path):
             with open(summary_path, 'rb') as f:
                 summary = pickle.load(f)
+                # correct missing information from previous versions of the summary
+                summary = correct_missing_info(summary)
                 # If the summary is a dict, convert to DataFrame row
                 if isinstance(summary, dict):
                     summaries.append(pd.DataFrame([summary]))
@@ -50,7 +69,8 @@ def build_summary():
         df = pd.concat(summaries, ignore_index=True)
         # sort the dictionary
         order = ['Date', 'Clusters', 'Bin. Formulation', 'Model carac.', 'Seed', 'SNR', 'Warm-start', 'Learning rate',
-                 'gamma', 'Update Frequency', 'Std w', 'Std b', 'N_ts', 'Nb Epoch', 'Best Epoch', 'Loss metric',
+                 'gamma', 'Update Frequency', 'Std w', 'Std b', 'Std requires grad', 'S', 'N_ts', 'Nb Epoch',
+                 'Best Epoch', 'Loss metric',
                  'Training time', 'Validation time', 'Test time', 'Test MIP gap', 'Train Infsbl', 'Val Infsbl',
                  'Test Infsbl',
                  'Best Train Loss', 'Best Val Loss', 'Test Loss', 'Test Expost+', 'Test MAE', 'Test MSE',
@@ -63,7 +83,9 @@ def build_summary():
     df.set_index("Date", inplace=True)
     df.sort_index(inplace=True, ascending=False)
     df.reset_index(inplace=True)
-    print(df)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        print(df)
     df.to_excel(os.path.join(paths["cvxpylayer"], 'summary.xlsx'), index=True, header=True, na_rep="NaN")
 
 if __name__ == "__main__":

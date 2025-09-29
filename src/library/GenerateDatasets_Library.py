@@ -207,7 +207,11 @@ def splitintozones(df, listofzones):
     return df_l
 
 
-def get_variable_list(bldg: c.BuildingModel):
+def get_variable_list(bldg):
+    """
+    Function to get the list of variables to log during the EnergyPlus simulation.
+    :param bldg: the BuildingModel object
+    """
     # the variables without the zone name
     variables = [
         "OutputVariable,Site Outdoor Air Drybulb Temperature,ENVIRONMENT",
@@ -325,7 +329,11 @@ def set_time_step(hourly_ts_frequency, minimum_hourly_ts_frequency,
 
 
 ### principal function
-def generate_datasets(buildingmodel: c.BuildingModel, save_fig: bool = False):
+def generate_datasets(buildingmodel, save_fig: bool = False):
+    """
+    Generate the datasets for the building model provided in input.
+    :param buildingmodel: the BuildingModel object
+    """
     ########## 0. Set the minimum time step ##########
     set_time_step(buildingmodel.simulationfrequency, buildingmodel.simulationfrequency,
                           buildingmodel.idf_filepath)

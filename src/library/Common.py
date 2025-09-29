@@ -13,7 +13,6 @@ import os
 import pandas as pd
 import torch
 
-from src.library.Building import BuildingModel
 from src.library.Classes import Database
 from src.library.Base import getcolumnname
 
@@ -204,7 +203,7 @@ def readvarseso(folder_path: str):
         raise FileNotFoundError("Several eso file in this directory. There should be only one.")
 
 
-def create_clean_eplusoutcsv(buildingmodel: BuildingModel, skipcsv=False):
+def create_clean_eplusoutcsv(buildingmodel, skipcsv=False):
     """
     This file is to be used as a subfile for reading eplusout.eso files, convert them to .csv, clean them and save them
     as an .xlsx file for comfort.
@@ -554,6 +553,7 @@ def map_dict(d, func):
 
 def iter_dic(d, f, *args, inplace=True, **kwargs):
     """
+    PRESERVE GRADIENT TRACKING
     Recursive function to iterate over a dictionary and apply a function to each leaf value.
     Args:
         d:
@@ -562,14 +562,13 @@ def iter_dic(d, f, *args, inplace=True, **kwargs):
     Returns:
 
     """
-    if not inplace:
-        d = deepcopy(d)
+    new_d = d if inplace else {}
     for k, v in d.items():
         if isinstance(v, dict):
-            iter_dic(v, f, *args, inplace=True, **kwargs)
+            new_d[k] = iter_dic(v, f, *args, inplace=inplace, **kwargs)
         else:
-            d[k] = f(v, *args, **kwargs)
-    return d
+            new_d[k] = f(v, *args, **kwargs)
+    return new_d
 
 
 def agg_itr_of_dict(dict_itr, fn=lambda x: x, *args, **kwargs):
@@ -714,6 +713,57 @@ def append_and_return(x, l):
     """
     l.append(x)
     return x
+
+
+def append_if_leaf_rg_and_return(x, l):
+    """
+    Append element x to list l gathering the tensors and return x
+    iff the tensor is a leaf tensor that requires grad.
+    Args:
+        x: element to append and return
+        l: list
+
+    Returns: x
+
+    """
+    if x.requires_grad and x.is_leaf:
+        return append_and_return(x, l)
+    return x
+
+
+def float_grad(tensor):
+    # if tensor < 0:
+    #     warnings.warn("Negative value for one of the parameters of the RC model. Absolute value taken.")
+    return tensor.to(torch.float).requires_grad_()
+
+
+def tile_daily_pattern(full_year_index: pd.DatetimeIndex, daily_pattern: pd.Series) -> pd.Series:
+    """
+    Given a full year datetime index (hourly) and a daily pattern Series,
+    tile the daily pattern to fill the year aligned with full_year_index.
+
+    Parameters:
+    - full_year_index: pd.DatetimeIndex covering the full year at hourly frequency
+    - daily_pattern: pd.Series indexed with one day's hourly timestamps or range(24)
+
+    Returns:
+    - pd.Series indexed by full_year_index with tiled daily pattern values
+    """
+
+    # Determine number of hours in daily pattern
+    daily_length = len(daily_pattern)
+    if daily_length == 0:
+        raise ValueError("daily_pattern must contain at least one element")
+
+    # Number of repetitions needed to cover the full year
+    reps = int(np.ceil(len(full_year_index) / daily_length))
+
+    # Tile the daily pattern values to cover the full range
+    tiled_values = np.tile(daily_pattern.values, reps)[:len(full_year_index)]
+
+    # Create Series with the full year index
+    full_year_series = pd.Series(data=tiled_values, index=full_year_index)
+    return full_year_series
 
 
 

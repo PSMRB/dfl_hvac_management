@@ -2,6 +2,8 @@ import cvxpy as cp
 from datetime import datetime
 from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
+from src.library.Building import BuildingModel
+from src.library.Classes import Stopwatch
 import src.library.Common as c
 from src.library.EnergyPlusAPI import EnergyPlusSimulator
 from src.library.GenerateDatasets_Library import get_variable_list
@@ -9,12 +11,13 @@ from src.library.Market import Market
 from src.library.myomlt.block import OmltBlock
 from src.library.myomlt.neuralnet.nn_formulation import ReluBigMFormulation, LeakyReluBigMFormulation
 from src.library.myomlt.neuralnet.layer import InputLayer
-from src.library.OptimizationProblem_Deterministic_Lib import modify_idf
 import numpy as np
 import os
 import pandas as pd
+import pickle
 import pyomo.environ as pe
 from pyomo.environ import Reals, NonNegativeReals, Binary
+import re
 import scienceplots
 import torch
 import warnings
@@ -151,6 +154,7 @@ class EMS:
             state.pop("cvxpy_opti_formulation", None)
             state["cvxpy_opti_formulation"] = {"param_dic": param_dic, "variable_dic": var_dic}
         state.pop("bldg_assets", None)
+        state.pop("market", None)
         state["solver_status"].pop("options", None)
         state["solver_status"].pop("status", None)
         return state
@@ -160,14 +164,201 @@ class EMS:
         return self.expost_power_cost + self.expost_temperature_penalty
 
 
-    # def save(self, filepath):
-    #     """
-    #     Save the EMS object to a file
-    #     :param filepath: str
-    #         The path to the file where to save the EMS object
-    #     """
-    #     with open(filepath, 'wb') as f:
-    #         pickle.dump(self, f)
+    @classmethod
+    def build_ems(cls, day_date, thermal_model, paths, now,
+                  cvxpy_opti_formulation, relu_relaxation_for_convex_opti,
+                  warm_start, hyperparameters, snr):
+        """
+        Factory method to create the EMS object for the case study.
+
+        :param day_date: the date of the day to simulate (string "dd/mm/yyyy")
+        :param thermal_model: either "nn" or "rcmodel" or "spatialrcmodel"
+        :param paths: a dictionary with the paths to the data
+        :param now: the current date and time (string "yyyy-mm-dd_HH-MM-SS")
+        :param cvxpy_opti_formulation: either None or a cvxpy formulation
+        :param relu_relaxation_for_convex_opti: one of "miqp", "qp", "fixed_bin"
+        :param warm_start: either "True", "False", "Noise", or "dfl"
+        :param hyperparameters: a dictionary with the hyperparameters of the neural network or rc model
+        :param snr: the signal to noise ratio (only if warm_start == "Noise")
+        :param best_epoch: if not None, the epoch of the model to be used (int)
+
+        N.B.: the cvxpy problem is formulated but the parameter values are not assigned.
+        """
+        ems = cls()
+
+        # set the EMS times
+        T0_date = day_date
+        T0 = pd.Timestamp(T0_date, tz="UTC")  # starting datetime of the simulation
+        # T0 = pd.Timestamp("01/01/2017", tz="UTC")
+        T_ems = 24  # number of hours in the EMS
+        dt_ems = 1  # time step period of the EMS in hour (e.g. 0.25 for 15min)
+        T_sim = 24  # number of hours in the simulation
+        dt_sim = 0.25  # time step period of the simulation in hour (e.g. 0.25 for 15min)
+        ems.set_times(T0, T_ems, dt_ems, T_sim, dt_sim)
+
+        ####################################
+        ### Create the BuildingModel object
+        ####################################
+
+        # parameters
+        zone_names = ['Attic', 'Core_ZN', 'Perimeter_ZN_1', 'Perimeter_ZN_2', 'Perimeter_ZN_3', 'Perimeter_ZN_4']
+        floors = [1] * 6
+        zonesandfloors = zip(zone_names, floors)
+        # HVAC system names (in the same order as the zone_names)
+        ACUs = [f"PSZ-AC:{i}" for i in range(1, 6)]
+        acusandfloors = zip(ACUs, [1] * 5)
+
+        # Create building object (and the associated zones)
+        bldg = BuildingModel("6zones_ASHRAE901_OfficeSmall_STD2020_Denver_2006-2020", paths["idf_filepath"],
+                             paths["epw_filepath"], paths["output_folderpath"], zonesandfloors, acusandfloors)
+
+        # load the one-year simulation data
+        bldg.load_simulation(paths["training_data_filepath"], "UTC")
+
+        # set the nondispatchable load
+        nd_load = bldg.simulation["Electricity:Building[Wh]"] / 1000
+        nd_load.name = nd_load.name.replace("[Wh]", "[kWh]")
+        bldg.set_nondispatchable_load(nd_load)
+
+        # set the HVAC system and thermal requirements for each zone
+        for z in bldg.zone_assets:
+            z.set_HVAC(bldg, ems.T0)
+            yearly_occ = c.tile_daily_pattern(bldg.simulation.index, pd.Series([0.1] * 8 + [1] * 11 + [0.3] * 5))
+            z.set_occupancy_weights(yearly_occ)
+            z.set_target_temperature(pd.Series(21, index=bldg.simulation.index))
+        # compute the HVAC capacity of each PACU
+        bldg.compute_PACU_capacity()
+
+        ####################################
+        ### Optimization problem
+        ####################################
+
+        # add the building to the EMS, /!\ for several buildings, create a list of buildings and add them with pd.concat
+        ems.bldg_assets.loc[bldg.name] = bldg
+
+        # Create the market conditions
+        line_capacity = 1e4  # kW
+        demand_charge = 0.4  # €/kW
+        daily_prices = np.transpose([[*[0.3] * 6, *[0.6] * 13, *[0.3] * 5], [0.2] * 24])[:ems.ts_ems[:-1].shape[0],:]  # €/kWh
+        yearly_import_prices = c.tile_daily_pattern(bldg.simulation.index, pd.Series(daily_prices[:, 0],
+                                                                                     index=ems.ts_ems[:-1]))
+        yearly_export_prices = c.tile_daily_pattern(bldg.simulation.index, pd.Series(daily_prices[:, 1],
+                                                                                     index=ems.ts_ems[:-1]))
+        # prices go from midnight to 11pm
+        elec_prices = pd.concat({"import_price": yearly_import_prices, "export_price": yearly_export_prices}, axis=1)
+        ems.set_market(demand_charge, elec_prices["import_price"], elec_prices["export_price"], line_capacity)
+
+        ### Load thermal model (and build save_folderpath)
+        # if we do not load from a previous training (best_epoch is None), load the best model from the historical warm-start
+        if thermal_model == "nn":
+            NN_tail_folderpath = os.path.dirname(re.split("/NN/|/cvxpylayer/", paths["initial_model_folderpath"])[1])
+            cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"], NN_tail_folderpath,
+                                                            now)
+            if "dfl" in warm_start:
+                with open(os.path.join(paths["initial_model_folderpath"], "summary.pkl"), 'rb') as file:
+                    summary = pickle.load(file)
+                with open(os.path.join(paths["initial_model_folderpath"], "weights.pkl"), 'rb') as file:
+                    weights_df = pickle.load(file)
+                    weights = weights_df.iat[summary['Best Epoch'] + 1, 0]
+                with open(os.path.join(paths["initial_model_folderpath"], "biases.pkl"), 'rb') as file:
+                    biases_df = pickle.load(file)
+                    biases = biases_df.iat[summary['Best Epoch'] + 1, 0]
+                # load the initial nn model that was trained on historical data and warm-started the dfl training
+                nn_summary_filepath = os.path.abspath("data/SmallOffice/Models/NN/TrainingSummary_NN2.xlsx")
+                NN_datetime = c.getbestmodel(nn_summary_filepath, hyperparameters)
+                NN_tail_filepath = (f"NotSparse/NN_{hyperparameters['nb_layers']}layers_"
+                                    f"{hyperparameters['nb_neurons']}neurons/{NN_datetime}")
+                ito_model_folderpath = os.path.join(os.path.dirname(nn_summary_filepath), NN_tail_filepath)
+                # description of the neural network to be saved
+                nn_description = f"{hyperparameters['nb_layers']}layers_{hyperparameters['nb_neurons']}neurons_each"
+                # load nn model
+                bldg.load_nn(ito_model_folderpath, nn_description)
+            else:
+                # description of the neural network to be saved
+                nn_description = f"{hyperparameters['nb_layers']}layers_{hyperparameters['nb_neurons']}neurons_each"
+                # load nn model
+                bldg.load_nn(paths["initial_model_folderpath"], nn_description)
+                # get the weights and biases from the onnx model for the first iteration
+                weights, biases = EMS.get_w_and_b_from_onnx(ems.bldg_assets, warm_start, snr)
+            # Tighten the bounds of the NN
+            for b in ems.bldg_assets.values:
+                # all the inputs are variable (not parameters)
+                is_parameter = [False] * len(bldg.nn_scaled_input_bounds)
+                if "not_tight" not in warm_start:
+                    # all the inputs after 2 * the number of controlled zones are parameters
+                    nb_variables = 2 * len(b.controlled_zone_names)
+                    is_parameter[nb_variables:] = [True] * len(is_parameter[nb_variables:])
+                b.adjust_bounds(ems.ts_ems, is_parameter)
+        elif thermal_model == "rcmodel":
+            # folderpath to save the output
+            cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"], "RC", now)
+            # get the weights and biases from the pickle model for the first iteration
+            if "dfl" in warm_start:  # load a model trained with dfl
+                with open(os.path.join(paths["initial_model_folderpath"], "summary.pkl"), 'rb') as file:
+                    summary = pickle.load(file)
+                with open(os.path.join(paths["initial_model_folderpath"], "weights.pkl"), 'rb') as file:
+                    weights_df = pickle.load(file)
+                    weights = weights_df.iat[summary['Best Epoch'] + 1, 0]
+                with open(os.path.join(paths["initial_model_folderpath"], "biases.pkl"), 'rb') as file:
+                    biases_df = pickle.load(file)
+                    biases = biases_df.iat[summary['Best Epoch'] + 1, 0]
+            else:  # load the model pre-trained on historical data
+                # load pytorch rcmodel
+                bldg.load_rcmodel(os.path.join(paths["initial_model_folderpath"], "RCmodel.pth"))
+                # get the weights and biases from the torch model for the first iteration
+                weights, biases = EMS.get_w_and_b_from_rc_pkl(ems.bldg_assets, warm_start, hyperparameters["target"],
+                                                              snr)
+        elif thermal_model == "spatialrcmodel":
+            # folderpath to save the output
+            cvxpylayer_model_save_folderpath = os.path.join(paths["cvxpylayer_models_folderpath"], "spatialRC", now)
+            # get the weights and biases from the pickle model for the first iteration
+            if "dfl" in warm_start:  # load a model trained with dfl
+                with open(os.path.join(paths["initial_model_folderpath"], "summary.pkl"), 'rb') as file:
+                    summary = pickle.load(file)
+                with open(os.path.join(paths["initial_model_folderpath"], "weights.pkl"), 'rb') as file:
+                    weights_df = pickle.load(file)
+                    weights = weights_df.iat[summary['Best Epoch'] + 1, 0]
+                with open(os.path.join(paths["initial_model_folderpath"], "biases.pkl"), 'rb') as file:
+                    biases_df = pickle.load(file)
+                    biases = biases_df.iat[summary['Best Epoch'] + 1, 0]
+            else:  # load the model pre-trained on historical data
+                # load pytorch spatial rcmodel
+                bldg.load_rcmodel(os.path.join(paths["initial_model_folderpath"], "RCmodel.pth"))
+                # get the weights and biases from the torch model for the first iteration
+                weights, biases = EMS.get_w_and_b_from_rc_pkl(ems.bldg_assets, warm_start, hyperparameters["target"],
+                                                              snr)
+        else:
+            raise ValueError("The thermal model must be either 'nn' or '(spatial)rcmodel'.")
+        c.createdir(cvxpylayer_model_save_folderpath, up=2)
+
+        # Build the cvxpy formulation in the ems object
+        if cvxpy_opti_formulation is None:
+            if relu_relaxation_for_convex_opti is None:
+                raise ValueError(
+                    "Either the relu relaxation ('miqp', 'qp', 'fixed_bin') OR the thermal model ('rcmodel', 'nn')"
+                    "must be provided to build the cvxpy formulation.")
+            ems.cvxpy_opti_formulation = ems.build_cvxpy(relu_relaxation_for_convex_opti, thermal_model)
+        else:
+            ems.thermal_model = thermal_model
+            ems.cvxpy_opti_formulation = cvxpy_opti_formulation
+
+        return ems, weights, biases, cvxpylayer_model_save_folderpath
+
+
+    def update_ems(self, day_date):
+        # set the EMS times
+        T0_date = day_date
+        T0 = pd.Timestamp(T0_date, tz="UTC")  # starting datetime of the simulation
+        T_ems = 24  # number of hours in the EMS
+        dt_ems = 1  # time step period of the EMS in hour (e.g. 0.25 for 15min)
+        T_sim = 24  # number of hours in the simulation
+        dt_sim = 0.25  # time step period of the simulation in hour (e.g. 0.25 for 15min)
+        self.set_times(T0, T_ems, dt_ems, T_sim, dt_sim)
+
+        # update the initial temperature of the zones
+        for b in self.bldg_assets:
+            for z in b.zone_assets:
+                z.Tin0 = b.simulation[f"Zone Mean Air Temperature,{z.name}"].loc[T0]
 
 
     def set_times(self, T0: pd.Timestamp, T_ems: int = None, dt_ems: float = None, T_sim: int = None,
@@ -200,300 +391,37 @@ class EMS:
             raise IndexError("The datetime index of the prices do not contain all the EMS datetime index.")
         self.market = Market(demand_charge, prices_import, prices_export, line_capacity)
 
-    # def optimize(self, ReluFormulation=ReluBigMFormulation):
-    #     """
-    #     Optimize the energy management system. The optimization problem is a MILP problem because the indoor temperature
-    #     is modelled with NNs.
-    #     The model is conceived in such a way that each building is a pyomo block.
-    #     :return:
-    #     """
-    #     # create the model m. Model m is the equivalent of a community => variables at m level are for the community
-    #     m = pe.ConcreteModel()
-    #
-    #     ### create the sets common to all the buildings
-    #     m.S_ts = pe.Set(initialize=self.ts_ems[:-1], ordered=True)  # time steps (midnight not included)
-    #     m.S_ts_mn = pe.Set(initialize=self.ts_ems, ordered=True)  # time steps (midnight included)
-    #
-    #     # set of buildings is made of their names
-    #     m.S_buildings = pe.Set(initialize=self.bldg_assets.index.to_list())
-    #
-    #     ### create the variables at the community level
-    #     m.p_demand_max = pe.Var(domain=Reals, bounds=(0, self.market.line_capacity))
-    #     m.p_import = pe.Var(m.S_ts, domain=NonNegativeReals)  # no import decision for midnight next day
-    #     m.p_export = pe.Var(m.S_ts, domain=NonNegativeReals)  # no export decision for midnight next day
-    #
-    #     ### create the building blocks
-    #     def create_building_block(bblock, bn):
-    #         """
-    #         Create the building block
-    #         :param bblock: a pyomo block which represents a building (bblock for building block)
-    #         :param bn: a string which is the name of the building represents by the block (bn for building name)
-    #         :return:
-    #         """
-    #         # retrieve the model (community level)
-    #         m = bblock.model()
-    #
-    #         ### Building Block sets
-    #         # set of zones is made of the names of the zones (specific to each building)
-    #         # must be ordered for nn intput/output
-    #         bblock.S_zones = pe.Set(initialize=self.bldg_assets[bn].zones_df_no_plenum["name"].to_list(), ordered=True)
-    #         bblock.S_acus = pe.Set(initialize=self.bldg_assets[bn].ACUs.values(), ordered=True)
-    #
-    #         ### Create a block for each zone
-    #         def create_zone_block(zblock, zn):
-    #             """
-    #             Create the zone block
-    #             :param zblock: a pyomo block which represents a zone (zblock for zone block)
-    #             :param zn: a string which is the name of the zone represents by the block (z for zone name)
-    #             :return:
-    #             """
-    #             m = zblock.model()
-    #             bblock = zblock.parent_block()
-    #
-    #             ### zone Block variables
-    #             # electrical power for the HVAC until midnight next day (not included)
-    #             zblock.p_hvac = pe.Var(m.S_ts, domain=NonNegativeReals)
-    #             # indoor temperature until midnight next day (included)
-    #             zblock.t_in = pe.Var(m.S_ts_mn, domain=Reals)
-    #
-    #             # temperature comfort range
-    #             def C_temperature_comfort_range_(zblock, t):
-    #                 if t == m.S_ts_mn.first():
-    #                     return (self.bldg_assets[bn].zone_assets[zn].Tin0, zblock.t_in[t],
-    #                             self.bldg_assets[bn].zone_assets[zn].Tin0)
-    #                 return (self.bldg_assets[bn].zone_assets[zn].Tmin[t], zblock.t_in[t],
-    #                         self.bldg_assets[bn].zone_assets[zn].Tmax[t])
-    #
-    #             zblock.C_temperature_comfort_range = pe.Constraint(m.S_ts_mn, rule=C_temperature_comfort_range_)
-    #
-    #             # HVAC power capacities
-    #             def C_hvac_capacity_(zblock, t):
-    #                 return zblock.p_hvac[t] <= self.bldg_assets[bn].zone_assets[zn].hvac_capacity
-    #
-    #             zblock.C_hvac_capacity = pe.Constraint(m.S_ts, rule=C_hvac_capacity_)
-    #
-    #             # dummy thermal model instead of the NN (allow to have a linear model)
-    #             # => comment `bblock.B_thermal_model_nn = pe.Block(m.S_ts, rule=B_thermal_model_nn_)` ~line 265
-    #             def C_thermal_model_(zblock, t):
-    #                 return zblock.t_in[m.S_ts_mn.next(t)] == (0.8 * zblock.t_in[t]
-    #                                                           + 4 * zblock.p_hvac[t])
-    #
-    #             # zblock.dummylinreg = pe.Constraint(m.S_ts, rule=C_thermal_model_)
-    #
-    #         # Create the zone blocks
-    #         bblock.B_zones = pe.Block(bblock.S_zones, rule=create_zone_block)
-    #
-    #         ### Constraint on the PACU capacity
-    #         def C_pacu_capacity_(bblock, acu, t):
-    #             if "bot" in acu.lower():
-    #                 acu_zones = [zn for zn in bblock.S_zones if "bot" in zn.lower()]
-    #             elif "mid" in acu.lower():
-    #                 acu_zones = [zn for zn in bblock.S_zones if "mid" in zn.lower()]
-    #             elif "top" in acu.lower():
-    #                 acu_zones = [zn for zn in bblock.S_zones if "top" in zn.lower()]
-    #             else:
-    #                 raise ValueError("The name of the ACU must contain 'bot', 'mid' or 'top'")
-    #
-    #             return sum(bblock.B_zones[zn].p_hvac[t] for zn in acu_zones) <= self.bldg_assets[bn].ACU_capacity[acu]
-    #
-    #         bblock.C_pacu_capacity = pe.Constraint(bblock.S_acus, m.S_ts, rule=C_pacu_capacity_)
-    #
-    #         ### Building thermal model block = one for each time step. It contains a NN and the input - output
-    #         def B_thermal_model_nn_(tmblock, t):
-    #             """
-    #             The block for the thermal model contains:
-    #                 - one omlt block: the indoor temperature dynamics model
-    #                 - the constraint to connect the input to the omlt block
-    #                 - the constraint to connect the output of the omlt block
-    #             """
-    #             bblock = tmblock.parent_block()
-    #             m = bblock.model()
-    #
-    #             # create a subblock to store the nn
-    #             tmblock.nn = OmltBlock()
-    #             tmblock.nn.build_formulation(ReluFormulation(self.bldg_assets[bn].nn))
-    #             print(f'Block[{t}] built')
-    #
-    #             ### input/output constraint: set the input/output for the nn at this ts t
-    #             nb_controlled_zones = len(bblock.S_zones)
-    #
-    #             # set tin as input
-    #             # need to use a counter because input layer can be accessed only by index while the zone name is a str
-    #             cnt1 = 0
-    #
-    #             def C_input_nn_tin_(tmblock, zn):
-    #                 nonlocal cnt1
-    #                 # set the Zone Mean Air Temperature input
-    #                 tmp = tmblock.nn.inputs[cnt1] == bblock.B_zones[zn].t_in[t]
-    #                 cnt1 += 1
-    #                 return tmp
-    #
-    #             # set the HVAC power as input
-    #             cnt2 = 0
-    #
-    #             def C_input_nn_phvac_(tmblock, zn):
-    #                 nonlocal cnt2
-    #                 # set the HVAC power input
-    #                 tmp = tmblock.nn.inputs[cnt2 + nb_controlled_zones] == bblock.B_zones[zn].p_hvac[t] * 1000
-    #                 cnt2 += 1
-    #                 return tmp
-    #
-    #             def C_input_nn_tamb_(tmblock, i):
-    #                 return tmblock.nn.inputs[i] == self.bldg_assets[bn].simulation.at[
-    #                     t, "Site Outdoor Air Drybulb Temperature,ENVIRONMENT"]
-    #
-    #             # output constraint
-    #             cnt3 = 0
-    #
-    #             def C_output_nn_(tmblock, zn):
-    #                 nonlocal cnt3
-    #                 tmp = tmblock.nn.outputs[cnt3] == bblock.B_zones[zn].t_in[m.S_ts_mn.next(t)]
-    #                 cnt3 += 1
-    #                 return tmp
-    #
-    #             tmblock.C_input_nn_tin_ = pe.Constraint(bblock.S_zones, rule=C_input_nn_tin_)
-    #             tmblock.C_input_nn_phvac_ = pe.Constraint(bblock.S_zones, rule=C_input_nn_phvac_)
-    #             tmblock.C_input_nn_tamb_ = pe.Constraint([2 * nb_controlled_zones], rule=C_input_nn_tamb_)
-    #             tmblock.C_output_nn = pe.Constraint(bblock.S_zones, rule=C_output_nn_)
-    #
-    #         # Each building block contains one thermal model block which contains all the omlt blocks (one per ts)
-    #         bblock.B_thermal_model_nn = pe.Block(m.S_ts, rule=B_thermal_model_nn_)
-    #
-    #     # Create the building blocks
-    #     m.B_bldgs = pe.Block(m.S_buildings, rule=create_building_block)
-    #
-    #     # power balance
-    #     def C_power_balance_(m, t):
-    #         return m.p_import[t] - m.p_export[t] == sum(  # self.bldg_assets[bn].nd_load[t] +
-    #             sum(m.B_bldgs[bn].B_zones[zn].p_hvac[t] for zn in
-    #                 m.B_bldgs[bn].S_zones)
-    #             for bn in m.S_buildings)
-    #
-    #     m.C_power_balance = pe.Constraint(m.S_ts, rule=C_power_balance_)
-    #
-    #     # m.C_power_balance.pprint()
-    #
-    #     # maximum power demand
-    #     def C_power_demand_max_(m, t):
-    #         return m.p_demand_max >= m.p_import[t] - m.p_export[t]
-    #
-    #     m.C_power_demand_max = pe.Constraint(m.S_ts, rule=C_power_demand_max_)
-    #
-    #     ### Objective function
-    #     def objective_(m):
-    #         return self.market.demand_charge * m.p_demand_max + sum(self.market.prices_import[t] * m.p_import[t]
-    #                                                                 - self.market.prices_export[t] * m.p_export[t]
-    #                                                                 for t in m.S_ts) * self.dt_ems
-    #
-    #     m.obj = Objective(rule=objective_, sense=pe.minimize)  # sense=1 => minimize (default), sense=-1 => maximize
-    #
-    #     #######################################
-    #     ### STEP 4: solve the optimisation
-    #     #######################################
-    #     N_cont_var = sum(1 for var in m.component_data_objects(pe.Var, active=True) if var.is_continuous())
-    #     N_bin_var = sum(1 for var in m.component_data_objects(pe.Var, active=True) if var.is_binary())
-    #     N_constraints = sum(1 for _ in m.component_data_objects(pe.Constraint))
-    #     print(f'Number of:\n\t* continuous variables = {N_cont_var}\n'
-    #           f'\t* binary variables = {N_bin_var}\n'
-    #           f'\t* constraints = {N_constraints}')
-    #
-    #     print('*** SOLVING THE OPTIMISATION PROBLEM ***')
-    #     solver_engine = 'gurobi'  # 'gurobi' or 'glpk'
-    #     solver = pe.SolverFactory(solver_engine)  # Select the solver
-    #     solver.options['TimeLimit'] = 60  # Set the maximum solving time to X seconds
-    #     solver.options['MIPgap'] = 0.01  # Set the MIPgap to X (0.01 = 1%)
-    #     solver.options['Presolve'] = 2
-    #     solver.options['Threads'] = 10
-    #     solver.options['Heuristics'] = 0.05
-    #     pprint(m.nconstraints)
-    #     status = solver.solve(m, tee=True)  # Solve the model
-    #     print(status)
-    #     # if there is a solution
-    #     if status.solver.status == SolverStatus.ok or status.solver.status == SolverStatus.aborted:
-    #         obj = pe.value(m.obj)
-    #         mip_gap = (status.problem.upper_bound - status.problem.lower_bound) / status.problem.upper_bound
-    #         solving_time = status.solver.time
-    #         # if the solution is optimal
-    #         if status.solver.termination_condition == TerminationCondition.optimal:
-    #             print('* OPTIMISATION SUCCESSFUL *')
-    #             print(f'Solving time = {solving_time:.2f} s')
-    #             print("Solution value:\t", obj)
-    #         # if the solution is suboptimal, stop due to time budget reached
-    #         elif status.solver.termination_condition == TerminationCondition.maxTimeLimit:
-    #             print('* OPTIMISATION TIMED OUT *')
-    #             print(f'MIP gap = {mip_gap:.2%}')
-    #             print("Solution value:\t", obj)
-    #
-    #         p_import_val = np.fromiter(m.p_import.get_values().values(), dtype=float).reshape(self.nb_ts_ems - 1, 1)
-    #         p_export_val = np.fromiter(m.p_export.get_values().values(), dtype=float).reshape(self.nb_ts_ems - 1, 1)
-    #         if ((p_import_val * p_export_val).round(3) != 0).any():
-    #             tmp = (p_import_val * p_export_val).round(3)
-    #             raise ValueError('Warning: Import and export powers cannot be non-zero at the same time')
-    #         p_demand_max_val = np.fromiter(m.p_demand_max.get_values().values(), dtype=float)[0]  # a scalar
-    #
-    #         # store the results
-    #         for b in self.bldg_assets:
-    #             variables = []
-    #             for z in b.zone_assets:
-    #                 if z.controlled:
-    #                     t_bldg_val = np.fromiter(m.B_bldgs[b.name].B_zones[z.name].t_in.get_values().values(),
-    #                                              dtype=float
-    #                                              ).reshape(-1, 1)
-    #                     p_hvac_val = np.fromiter(m.B_bldgs[b.name].B_zones[z.name].p_hvac.get_values().values(),
-    #                                              dtype=float
-    #                                              ).reshape(-1, 1)
-    #                     p_hvac_val = np.concatenate((p_hvac_val, p_hvac_val[-1, :].reshape((1, 1))), axis=0)
-    #                     z.expected_results = pd.DataFrame(data=np.concatenate((t_bldg_val, p_hvac_val),
-    #                                                                           axis=1),
-    #                                                       index=self.ts_ems, columns=['Tin', 'P_hvac'])
-    #                     variables.extend([t_bldg_val.flatten(), p_hvac_val.flatten()])
-    #             col_names = pd.MultiIndex.from_product([b.zones_df_no_plenum["name"], ['Tin', 'P_hvac']],
-    #                                                    names=['zone', 'variable'])
-    #             b.expected_results = pd.DataFrame(np.array(variables).T, index=self.ts_ems, columns=col_names)
-    #
-    #     # else, there is NO solution
-    #     else:
-    #         # print the problem
-    #         m.pprint()
-    #
-    #         print('* OPTIMISATION FAILED *')
-    #
-    #         # set the values to nan and zero
-    #         obj = np.nan
-    #         mip_gap = np.nan
-    #         solving_time = solver.options['TimeLimit']
-    #
-    #         p_import_val = np.zeros((self.nb_ts_ems - 1, 1))
-    #         p_export_val = np.zeros((self.nb_ts_ems - 1, 1))
-    #         p_demand_max_val = 0  # a scalar
-    #
-    #         # store the results
-    #         for b in self.bldg_assets:
-    #             variables = []
-    #             for z in b.zone_assets:
-    #                 if z.controlled:
-    #                     t_bldg_val = np.zeros((self.nb_ts_ems, 1))
-    #                     p_hvac_val = np.zeros((self.nb_ts_ems, 1))
-    #                     z.expected_results = pd.DataFrame(data=np.concatenate((t_bldg_val, p_hvac_val),
-    #                                                                           axis=1),
-    #                                                       index=self.ts_ems, columns=['Tin', 'P_hvac'])
-    #                     variables.extend([t_bldg_val.flatten(), p_hvac_val.flatten()])
-    #             col_names = pd.MultiIndex.from_product([b.zones_df_no_plenum["name"], ['Tin', 'P_hvac']],
-    #                                                    names=['zone', 'variable'])
-    #             b.expected_results = pd.DataFrame(np.array(variables).T, index=self.ts_ems, columns=col_names)
-    #
-    #     p_demand_max_vec = np.full((self.nb_ts_ems - 1, 1), p_demand_max_val)
-    #     self.expected_results = pd.DataFrame(data=np.concatenate((p_demand_max_vec, p_import_val, p_export_val),
-    #                                                              axis=1),
-    #                                          index=self.ts_ems[:-1], columns=['P_demand_max', 'P_import', 'P_export'])
-    #     self.solver_status = {'obj_val': obj,
-    #                           'solver_engine': solver_engine,
-    #                           'termination_condition': status.solver.termination_condition,
-    #                           'options': solver.options,
-    #                           'mip_gap': mip_gap,
-    #                           'solving_time': solving_time,
-    #                           'status': status,
-    #                           }
+    @staticmethod
+    def get_w_and_b_from_onnx(bldg_assets, warm_start, SNR, rg = False):
+        """
+        Function to get the weights and biases from the onnx file
+        :param bldg_assets: pd.Series of BuildingModel (the attribute contained in EMS object)
+        :return: two dictionaries containing the weights and biases of the cvxpylayer network with keys =
+                building name and values = dictionary with keys = layer number and values = torch.Tensor
+        """
+
+        weights, biases = {}, {}
+        for b in bldg_assets:
+            bn = b.name
+            weights[bn], biases[bn] = b.get_w_and_b_from_onnx(warm_start, SNR, rg)
+
+        return weights, biases
+
+
+    @staticmethod
+    def get_w_and_b_from_rc_pkl(bldg_assets, warm_start, target_name, SNR):
+        """
+        Function to get the weights and biases from the rc model
+        :param bldg_assets: pd.Series of BuildingModel (the attribute contained in EMS object)
+        :return:
+        """
+        weights, biases = {}, {}
+        for b in bldg_assets:
+            bn = b.name
+            weights[bn], biases[bn] = b.get_w_and_b_from_rc_pickle(warm_start, target_name, SNR)
+
+        return weights, biases
+
 
     def build_cvxpy(self, relu_relaxation, thermal_model: str = "nn",
                     target_name="Zone Mean Air Temperature(t+1)"):
@@ -1328,16 +1256,16 @@ class EMS:
         print("status:", prob.status)
         ### analyze the solution and save the results
         # if the solver returned an inaccurate, solve again with a new solver
-        if prob.status == "optimal_inaccurate":
-            # solver_engine = cp.MOSEK
-            # solver_parameters = {'verbose': False, "mosek_params": {'MSK_DPAR_OPTIMIZER_MAX_TIME': 60,
-            #                                                         'MSK_DPAR_MIO_TOL_REL_GAP': 0.01,
-            #                                                         'MSK_IPAR_NUM_THREADS': 10}}
-            # prob.solve(solver=solver_engine, **solver_parameters)
-            solver_engine = cp.GUROBI
-            solver_parameters = {'verbose': True, 'TimeLimit': 120, 'MIPGap': 0.01, 'Threads': 0, 'WLSTokenRefresh': 0}
-            prob.solve(reoptimize=True, solver=solver_engine, **solver_parameters)
-            print("status:", prob.status)
+        # if prob.status == "optimal_inaccurate":
+        #     # solver_engine = cp.MOSEK
+        #     # solver_parameters = {'verbose': False, "mosek_params": {'MSK_DPAR_OPTIMIZER_MAX_TIME': 60,
+        #     #                                                         'MSK_DPAR_MIO_TOL_REL_GAP': 0.01,
+        #     #                                                         'MSK_IPAR_NUM_THREADS': 10}}
+        #     # prob.solve(solver=solver_engine, **solver_parameters)
+        #     solver_engine = cp.GUROBI
+        #     solver_parameters = {'verbose': True, 'TimeLimit': 120, 'MIPGap': 0.01, 'Threads': 0, 'WLSTokenRefresh': 0}
+        #     prob.solve(reoptimize=True, solver=solver_engine, **solver_parameters)
+        #     print("status:", prob.status)
         # if no incumbent has been found within the time limit, multiply the time limit by 10 and resolve.
         while prob.status == "infeasible_inaccurate" and solver_parameters["TimeLimit"] <= 6000:
             new_time_limit = solver_parameters['TimeLimit'] * 10
@@ -1590,98 +1518,11 @@ class EMS:
 
         return parameter_init, parameters_to_optimize
 
-    # def build_cvxpylayer(self, formulation):
-    #     """
-    #     build a cvxpylayer object whose activation function is the optimization problem in build_cvxpy
-    #     :param formulation:
-    #     :return:
-    #     """
-    #
-    #     # Build the opti formulation of the declarative layer
-    #     prob2 = self.build_cvxpy(True, formulation)
-    #
-    #     # gather cvxpylayer variables (the output)
-    #     variables = []
-    #     t_in_l = [v for k, v in prob2.var_dict.items() if "t_in" in k]
-    #     p_hvac_l = [v for k, v in prob2.var_dict.items() if "p_hvac" in k]
-    #     variables.extend(t_in_l)
-    #     variables.extend(p_hvac_l)
-    #     variable_names = [k for k in prob2.var_dict.keys() if "t_in" in k] + \
-    #                      [k for k in prob2.var_dict.keys() if "p_hvac" in k]
-    #
-    #     # create the declarative layer
-    #     prob2_param_dict = prob2.param_dict  # get all the parameters of the problem as input (no choice, forced)
-    #     cvxpylayer = CvxpyLayer(prob2, parameters=list(prob2_param_dict.values()), variables=variables)
-    #
-    #     parameter_init, parameter_names, parameters_to_optimize, parameter_to_optimize_names = self.get_cvxpylayer_parameters(
-    #         prob2)
-    #
-    #     ### Check that the CVXPY MILP solution is the same as the CVXPYlayer solution
-    #     # solve the optimization layer based on the value of the parameters (= the input of the layer)
-    #     solution = cvxpylayer(*parameter_init, solver_args={"solve_method": "ECOS"})
-    #     # Quick check that MILP solution are the same as CVXPY solution
-    #     for i, sol in enumerate(solution):
-    #         sol = sol.numpy(force=True)
-    #         if (sol == variables[i].value).any():
-    #             stop = 1
-    #             raise ValueError(f"Solution {i} is the same as the MILP solution")
-    #
-    #     self.cvxpylayer = cvxpylayer
-    #     self.cvxpylayer_init_param = parameter_init
-    #     self.cvxpylayer_param_to_optimize = parameters_to_optimize
-    #     self.cvxpy_solution = solution
-    #     self.cvxpy_solution_names = variable_names
-
-    # def loss_cvxpylayer(self, seed=None):
-    #     """
-    #     Compute the performance loss associated with the cvxpylayer.
-    #     :param cvxpylayer_parameters (torch.Tensor): parameters of the cvxpylayer
-    #     :return:
-    #     """
-    #     if seed is not None:
-    #         torch.manual_seed(seed)
-    #     # Compute the loss
-    #     mseloss = torch.nn.MSELoss()
-    #     loss = 0
-    #     for b in self.bldg_assets:
-    #         cnt = 15
-    #         for z in b.zone_assets:
-    #             if z.controlled:
-    #                 TMP0 = torch.Tensor(z.expost_results["P_hvac"].resample('1H').mean().values[:-1])
-    #                 TMP1 = self.cvxpy_solution[cnt]
-    #                 TMP2 = mseloss(torch.Tensor(z.expost_results["P_hvac"].resample('1H').mean().values[:-1]),
-    #                                self.cvxpy_solution[cnt])
-    #                 loss += mseloss(torch.Tensor(z.expost_results["P_hvac"].resample('1H').mean().values[:-1]),
-    #                                 self.cvxpy_solution[cnt])
-    #                 cnt += 1
-    #     return loss
-
-    # def train_cvxpylayer(self, nb_epochs=100, seed=None):
-    #     """
-    #     Train the cvxpylayer to solve the MILP problem.
-    #     :return:
-    #     """
-    #     train_losses, test_losses = [], []
-    #     optimizer = torch.optim.Adam(self.cvxpylayer_param_to_optimize, lr=0.1)
-    #     for epoch in range(nb_epochs):
-    #         with torch.no_grad():
-    #             # solve the optimization layer based on the value of the parameters (= the input of the layer)
-    #             test_losses.append(self.loss_cvxpylayer(seed=seed))
-    #         # Resets the gradients of all optimized torch.Tensors to 0
-    #         optimizer.zero_grad()
-    #         # Compute the loss (should be done over all the representative scenarios)
-    #         l = self.loss_cvxpylayer(seed=seed)
-    #         train_losses.append(l)
-    #         # compute the gradient of Tensor l (the value of the loss) accross the graph
-    #         l.backward()
-    #         # update the parameters by performing one step in the sens of the gradient computed before
-    #         optimizer.step()
-    #     stop = 1
 
     def expost_simulation(self):
         ep = EnergyPlusSimulator()
         for b in self.bldg_assets:
-            b.idf_filepath_expost = modify_idf(b.idf_filepath, self.T0)
+            b.idf_filepath_expost = b.modify_idf(self.T0)
             simulationvariables = get_variable_list(b)
             # add the temperature setpoints to the list of variables
             for z in b.zone_assets[[("Plenum" not in z.name and "Attic" not in z.name) for z in b.zone_assets]]:
@@ -1689,6 +1530,8 @@ class EMS:
                     f"Actuator,Zone Temperature Control,Cooling Setpoint,{z.name.upper()};")
                 simulationvariables.append(
                     f"Actuator,Zone Temperature Control,Heating Setpoint,{z.name.upper()};")
+            # remove duplicates
+            simulationvariables = list(dict.fromkeys(simulationvariables))
             # In this case, desired frequence is the desired frequency for the inputs of the simulation
             # it must be the one of the ems
             b.set_simulationvariables(simulationvariables, simulationfrequency=self.dt_sim,
@@ -1721,36 +1564,79 @@ class EMS:
             # set the expost Tin and P_hvac in each zone
             b.set_expost()
 
-    # def compute_expost_cost(self):
-    #     """
-    #     Compute the ex-post cost of the energy management system.
-    #     :return:
-    #     """
-    #     self.expost_cost = 0
-    #     for b in self.bldg_assets:
-    #         if b.expost_cost is None:
-    #             b.compute_expost_cost(self.ts_ems, self.market)
-    #         self.expost_cost += b.expost_cost
-    #
-    # def compute_performance_loss(self):
-    #     """
-    #     Compute the performance metrics of the building assets.
-    #     :return:
-    #     """
-    #     self.compute_expost_cost()
-    #     cvxpy_hvac_solution = [sol for sol, name in zip(self.cvxpy_solution, self.cvxpy_solution_names) if
-    #                            "p_hvac" in name]
-    #     agg_line_import = cvxpy_hvac_solution[0]
-    #     for tsr in cvxpy_hvac_solution[1:]:
-    #         agg_line_import = torch.add(agg_line_import, tsr)
-    #     # Construct the price vector (import or export price)
-    #     prices = []
-    #     for t, ali in zip(self.ts_ems, agg_line_import):
-    #         prices.append(self.market.prices_import.loc[t] if ali >= 0 else self.market.prices_export.loc[t])
-    #     prices_tch = torch.tensor(prices, requires_grad=False, dtype=torch.float)
-    #     expected_cost_cvxpy = agg_line_import @ prices_tch
-    #     expected_cost_cvxpy += agg_line_import.max() * self.market.demand_charge
-    #     self.performance_loss = 0.5 * (self.expost_cost - expected_cost_cvxpy).pow(2)
+    def compute_power_cost(self, expost_or_expected):
+        """
+        Compute the objective value of the ex-post problem.
+        :param expost_or_expected: a string indicating if the expected or the ex-post results are considered
+        :param with_nd_load: boolean indicating if the non-dispatchable load is considered or not
+        :return: the corrected prices considering the demand charge
+        """
+        nd_load_ttl = pd.Series(0, index=self.ts_ems[:-1])
+        p_hvac_ttl = pd.Series(0, index=self.ts_ems[:-1])
+        for b in self.bldg_assets:
+            nd_load_ttl += b.nd_load.loc[self.ts_ems[:-1]]
+            if expost_or_expected == "expost":
+                p_hvac_ttl += b.expost_results.loc[:, (slice(None), "P_hvac")].resample(f"{self.dt_ems}H").sum().sum(
+                    axis=1) / 1000
+            elif expost_or_expected == "expected":
+                p_hvac_ttl += b.expected_results.loc[:, (slice(None), "P_hvac")].sum(axis=1)
+        p_import = p_hvac_ttl  # N.B.: in this case, p_import(here) = p_import - p_export in opti
+        if self.nd_load_flag:
+            p_import += nd_load_ttl
+        max_import_ts = p_import == p_import.max()
+        prices = self.market.prices_import.loc[self.ts_ems[:-1]]
+        increased_prices = prices + self.market.demand_charge
+        corrected_prices = np.where(max_import_ts, increased_prices, prices)
+        obj_value = np.sum(p_import * corrected_prices)
+        return obj_value, corrected_prices
+
+
+    def compute_temperature_penalty(self, expost_or_expected):
+        """
+        Compute the penalty for the temperature constraint.
+        :param self:
+        :param expost_or_expected: a string indicating if the expected or the ex-post results are considered
+        :return: the penalty for the temperature constraint
+        """
+        penalty = 0
+        for b in self.bldg_assets:
+            for z in b.zone_assets:
+                if z.controlled:
+                    if expost_or_expected == "expected":
+                        Tin = z.expected_results.loc[:, "Tin"]
+                        Ttgt = z.Ttgt.loc[self.ts_ems]
+                        ow = z.occupancy_weights
+                    elif expost_or_expected == "expost":
+                        Tin = z.expost_results.loc[:, "Tin"]
+                        Ttgt = z.Ttgt.loc[self.ts_ems].resample(f"{self.dt_ems}H").interpolate("time")
+                        ow = z.occupancy_weights.resample(f"{self.dt_ems}H").interpolate("time")
+                    penalty += (ow * (Tin - Ttgt) ** 2).sum()
+        return penalty
+
+
+    def solve_ems_and_simulate_expost(self, solver_parameters):
+        """
+        return the time to solve the ems problem and simulate the ex-post results
+        """
+        opti_time, simu_time = Stopwatch(), Stopwatch()
+        # solve the ems
+        opti_time.start()
+        self.solve_cvxpy_gurobi(solver_parameters)
+        opti_time.stop()
+        # if the problem is feasible: compute and save the expected and ex-post costs
+        if self.feasible:
+            # compute the expect cost and expected temperature penalty
+            self.expected_power_cost, _ = self.compute_power_cost("expected")
+            self.expected_temperature_penalty = self.compute_temperature_penalty("expected")
+            # simulate the decisions
+            simu_time.start()
+            self.expost_simulation()
+            simu_time.stop()
+            # compute the ex-post cost and ex-post temperature penalty
+            self.expost_power_cost, _ = self.compute_power_cost("expost")
+            self.expost_temperature_penalty = self.compute_temperature_penalty("expost")
+
+        return opti_time.get_elapsed_time(), simu_time.get_elapsed_time()
 
     def plot_results(self, ncols, nrows=None, path=None, format='svg', savefig=False, showfig=True):
         # PLOT 1: plot the price
@@ -1758,9 +1644,9 @@ class EMS:
         myFmt = mdates.DateFormatter('%H:%M')  # here you can format your datetick labels as desired
         plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=5))
         plt.gca().xaxis.set_major_formatter(myFmt)
-        ax.plot(self.ts_ems, self.market.prices_import.to_list() + [self.market.prices_import[-1]],
+        ax.plot(self.ts_ems, self.market.prices_import.loc[self.ts_ems],
                 label='ToU price')
-        ax.plot(self.ts_ems, self.market.prices_export.to_list() + [self.market.prices_export[-1]],
+        ax.plot(self.ts_ems, self.market.prices_export.loc[self.ts_ems],
                 label='Feed-in price')
         ax.set_ylim(top=max(self.market.prices_import.max(), self.market.prices_export.max()) * 1.25)
         ax.set_xlim(left=self.ts_ems[0], right=self.ts_ems[-1])
@@ -1832,7 +1718,7 @@ class EMS:
                     # compute the shaded area
                     x = z.expected_results.index
                     t_rule = self.cvxpy_opti_formulation.param_dict.get(f"temp_rule_{z.name}").value
-                    w = z.occupancy_weights.values
+                    w = z.occupancy_weights.loc[x].values
                     axes[i].hlines(y=t_rule, xmin=x[0], xmax=x[-1], colors='k', linestyles="solid", label=f"{us}Rule")
                     for j, c in enumerate(np.flip(np.concatenate(([1], range(5, 26, 5)), axis=0))):
                         delta_t = np.sqrt(c / w)
@@ -1907,83 +1793,60 @@ class EMS:
                 fig.savefig(os.path.join(path, f"AggregatedPowerHVAC_{b.name}.{format}"))
             fig.show() if showfig else plt.close(fig)
 
+            plt.close('all')
 
-    def save_results(self, summary_filepath):
-        """
 
-        :param summary_filepath: an xlsx file which contains the summary of the results
-        :return:
-        """
-        # Append those results to the summary file
-        if os.path.exists(summary_filepath):
-            summary_df = pd.read_excel(summary_filepath, index_col=0, header=0)
-        else:
-            summary_df = pd.DataFrame(
-                columns=['Date', 'Cluster', 'Net. Constr.', 'N_features', 'Resp. Var.', 'Model Type',
-                         'Model carac.', 'Building List', ])
-
-        if self.solver_status['solver_engine'] == "GUROBI":
-            summary_df = pd.concat(
-                [summary_df, pd.DataFrame({'Date': datetime.now(),
-                                           'Cluster': day_type,
-                                           'Model Type': full_t_in_model_type,
-                                           'Model carac.': self.bldg_assets[0].ml_model_doc,
-                                           'N_ts': self.nb_ts_ems,
-                                           'solver': self.solver_status['solver_engine'],
-                                           'Solving time': self.solver_status['solving_time'],
-                                           'MIP gap': self.solver_status['mip_gap'],
-                                           'Termination condition': self.solver_status['termination_condition'],
-                                           'N_cont_var': self.solver_status[
-                                               'status'].problem.number_of_continuous_variables,
-                                           'N_int_var': self.solver_status['status'].problem.number_of_integer_variables,
-                                           'N_bin_var': self.solver_status['status'].problem.number_of_binary_variables,
-                                           'N_constraints': self.solver_status['status'].problem.number_of_constraints,
-                                           'Electricity Cost': self.solver_status['obj_val'],
-                                           }, index=[summary_df.shape[0]])
-                 ], axis=0)
-        elif self.solver_status['solver_engine'] == "MOSEK":
-            summary_df = pd.concat(
-                [summary_df, pd.DataFrame({'Date': datetime.now(),
-                                           'Cluster': day_type,
-                                           'Model Type': full_t_in_model_type,
-                                           'Model carac.': self.bldg_assets[0].ml_model_doc,
-                                           'N_ts': self.nb_ts_ems,
-                                           'Solving time': self.solver_status['solving_time'],
-                                           'MIP gap': self.solver_status['status']['mip_gap'],
-                                           'Termination condition': self.solver_status['termination_condition'],
-                                           'N_cont_var': self.solver_status[
-                                               'status']['nb_var_cont'],
-                                           'N_int_var': self.solver_status['status']['nb_var_int'],
-                                           'N_bin_var': self.solver_status['status']['nb_var_bin'],
-                                           'N_constraints': self.solver_status['status']['nb_const'],
-                                           'N_parameters': self.solver_status['status']['nb_param'],
-                                           'Electricity Cost': self.solver_status['obj_val'],
-                                           }, index=[summary_df.shape[0]])
-                 ], axis=0)
-        summary_df.to_excel(summary_filepath, index=True)
-
-    # def compute_power_cost(self, expost_or_expected, with_nd_load=True):
+    # def save_results(self, summary_filepath):
     #     """
-    #     Compute the objective value of the ex-post problem.
-    #     :param expost_or_expected: a string indicating if the expected or the ex-post results are considered
-    #     :param with_nd_load: boolean indicating if the non-dispatchable load is considered or not
-    #     :return: the corrected prices considering the demand charge
+    #
+    #     :param summary_filepath: an xlsx file which contains the summary of the results
+    #     :return:
     #     """
-    #     nd_load_ttl = pd.Series(0, index=self.ts_ems[:-1])
-    #     p_hvac_ttl = pd.Series(0, index=self.ts_ems[:-1])
-    #     for b in self.bldg_assets:
-    #         nd_load_ttl += b.nd_load.loc[self.ts_ems[:-1]]
-    #         if expost_or_expected == "expost":
-    #             p_hvac_ttl += b.expost_results.loc[:, (slice(None), "P_hvac")].resample(f"{self.dt_ems}H").sum().sum(
-    #                 axis=1) / 1000
-    #         elif expost_or_expected == "expected":
-    #             p_hvac_ttl += b.expected_results.loc[:, (slice(None), "P_hvac")].sum(axis=1)
-    #     p_import = p_hvac_ttl  # N.B.: in this case, p_import(here) = p_import - p_export in opti
-    #     if with_nd_load:
-    #         p_import += nd_load_ttl
-    #     max_import_ts = p_import == p_import.max()
-    #     prices = self.market.prices_import.loc[self.ts_ems[:-1]]
-    #     increased_prices = prices + self.market.demand_charge
-    #     corrected_prices = np.where(max_import_ts, increased_prices, prices)
-    #     obj_value = np.sum(p_import * corrected_prices)
-    #     return obj_value, corrected_prices
+    #     # Append those results to the summary file
+    #     if os.path.exists(summary_filepath):
+    #         summary_df = pd.read_excel(summary_filepath, index_col=0, header=0)
+    #     else:
+    #         summary_df = pd.DataFrame(
+    #             columns=['Date', 'Cluster', 'Net. Constr.', 'N_features', 'Resp. Var.', 'Model Type',
+    #                      'Model carac.', 'Building List', ])
+    #
+    #     if self.solver_status['solver_engine'] == "GUROBI":
+    #         summary_df = pd.concat(
+    #             [summary_df, pd.DataFrame({'Date': datetime.now(),
+    #                                        'Cluster': day_type,
+    #                                        'Model Type': full_t_in_model_type,
+    #                                        'Model carac.': self.bldg_assets[0].ml_model_doc,
+    #                                        'N_ts': self.nb_ts_ems,
+    #                                        'solver': self.solver_status['solver_engine'],
+    #                                        'Solving time': self.solver_status['solving_time'],
+    #                                        'MIP gap': self.solver_status['mip_gap'],
+    #                                        'Termination condition': self.solver_status['termination_condition'],
+    #                                        'N_cont_var': self.solver_status[
+    #                                            'status'].problem.number_of_continuous_variables,
+    #                                        'N_int_var': self.solver_status['status'].problem.number_of_integer_variables,
+    #                                        'N_bin_var': self.solver_status['status'].problem.number_of_binary_variables,
+    #                                        'N_constraints': self.solver_status['status'].problem.number_of_constraints,
+    #                                        'Electricity Cost': self.solver_status['obj_val'],
+    #                                        }, index=[summary_df.shape[0]])
+    #              ], axis=0)
+    #     elif self.solver_status['solver_engine'] == "MOSEK":
+    #         summary_df = pd.concat(
+    #             [summary_df, pd.DataFrame({'Date': datetime.now(),
+    #                                        'Cluster': day_type,
+    #                                        'Model Type': full_t_in_model_type,
+    #                                        'Model carac.': self.bldg_assets[0].ml_model_doc,
+    #                                        'N_ts': self.nb_ts_ems,
+    #                                        'Solving time': self.solver_status['solving_time'],
+    #                                        'MIP gap': self.solver_status['status']['mip_gap'],
+    #                                        'Termination condition': self.solver_status['termination_condition'],
+    #                                        'N_cont_var': self.solver_status[
+    #                                            'status']['nb_var_cont'],
+    #                                        'N_int_var': self.solver_status['status']['nb_var_int'],
+    #                                        'N_bin_var': self.solver_status['status']['nb_var_bin'],
+    #                                        'N_constraints': self.solver_status['status']['nb_const'],
+    #                                        'N_parameters': self.solver_status['status']['nb_param'],
+    #                                        'Electricity Cost': self.solver_status['obj_val'],
+    #                                        }, index=[summary_df.shape[0]])
+    #              ], axis=0)
+    #     summary_df.to_excel(summary_filepath, index=True)
+

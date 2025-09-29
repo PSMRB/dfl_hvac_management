@@ -1,16 +1,21 @@
-import operator
-import warnings
-
+from eppy.modeleditor import IDF
 import joblib
 import numpy as np
 import onnx
+import operator
 import os
 import pandas as pd
+import sys
+import tempfile
 import torch
+import warnings
 
+import src.library.Common as c
 from src.library.myomlt import OffsetScaling
 from src.library.myomlt.io import load_onnx_neural_network
 from src.library.myomlt.io.input_bounds import load_input_bounds
+from src.library.myomlt.neuralnet.layer import InputLayer
+
 
 
 class BuildingModel:
@@ -170,6 +175,60 @@ class BuildingModel:
             self.simulation = pd.read_hdf(store, key="/df", mode="r")
         self.simulation.index = pd.DatetimeIndex(self.simulation.index, tz=tz)
 
+    def modify_idf(self, T0, idd_filepath=None):
+        #                                          /Applications/EnergyPlus-22-1-0/Energy+.idd
+        # version 22-2-0_arm64                     /Applications/EnergyPlus-22-2-0_arm64/Energy+.idd
+        # CECI version 22.1.0   /home/users/f/a/favarop/.local/src/EnergyPlus-22.1.0_copy/Products/Energy+.idd
+        """
+        Modify the IDF file.
+        :param idf_filepath: idf file path, the building model input data file
+        :param idd_filepath: the file to the EnergyPlus Input Data Dictionary. Must be adapted to the version of EnergyPlus.
+        :param T0: a pd.Timestamp object representing the day of interest
+        :return:
+        """
+        idf_filepath = self.idf_filepath
+        if idd_filepath == None:
+            energyplus_folderpath = sys.path[0]
+            idd_filepath = os.path.join(energyplus_folderpath, "Energy+.idd")
+
+        IDF.setiddname(idd_filepath)
+        idf = IDF(idf_filepath)
+        runperiod = idf.idfobjects["RunPeriod"][0]
+        # Modify IDF file to run only the day of interest and the some days because, E+ runs from 01:00 to 24:00
+        # but also to have the building dynamic correct.
+        startday = T0 - pd.Timedelta(days=5)
+        runperiod.Begin_Month, runperiod.Begin_Day_of_Month, runperiod.End_Month, runperiod.End_Day_of_Month = (
+            startday.month, startday.day, T0.month, T0.day)
+        # print(runperiod)
+        # make sure warm-up days are numerous enough for good computation
+        bldg = idf.idfobjects["Building"][0]
+        nb_warmup_days = 10
+        bldg.Maximum_Number_of_Warmup_Days = nb_warmup_days
+        bldg.Minimum_Number_of_Warmup_Days = nb_warmup_days
+        # Set the tolerance for the unmet setpoints
+        tolerance_unmet_stpt = idf.idfobjects["OutputControl:ReportingTolerances"][0]
+        tolerance_unmet_stpt.Tolerance_for_Time_Heating_Setpoint_Not_Met = 0.1
+        tolerance_unmet_stpt.Tolerance_for_Time_Cooling_Setpoint_Not_Met = 0.1
+        # Modify the HVAC schedule to be available all the time (but not modifying the Design Days)
+        compact_schedules = idf.idfobjects["Schedule:Compact"]
+        for cs in compact_schedules:
+            if "HVACOperationSchd" == cs.Name:
+                cs.Field_2 = "For: SummerDesignDay"
+                cs.Field_9 = "For: WinterDesignDay"
+                cs.Field_12 = "For: AllOtherDays"
+                cs.Field_14 = 1.0
+        # Modify the AvailabilityManager:NightCycle to reduce the thermostat tolerance to 0.
+        # Not really necessary since we have modified the hvac schedule to be available all the time
+        all_amnc = idf.idfobjects["AvailabilityManager:NightCycle"]
+        for amnc in all_amnc:
+            amnc.Thermostat_Tolerance = 0
+        # save_filepath = idf_filepath.replace(".idf", "_expost.idf")
+        # idf.saveas(save_filepath)
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".idf", delete=False) as tmpfile:
+            idf.saveas(tmpfile.name)
+
+        return tmpfile.name
+
     def set_nondispatchable_load(self, load: pd.Series):
         """
         Set the non-dispatchable load of the building in kW
@@ -304,8 +363,12 @@ class BuildingModel:
         """
         col_names = pd.MultiIndex.from_product([self.zones_df_no_plenum["name"], ['Tin', 'P_hvac']],
                                                names=['zone', 'variable'])
+        # Clear previous expost results
+        self.expost_results = pd.DataFrame()
         for z in self.zone_assets:
             if z.controlled:
+                # clear previous expost results
+                z.expost_results = pd.DataFrame()
                 cols = [f"Zone Mean Air Temperature,{z.name}", f"Air System Electricity Energy,{z.acu}[Wh]"]
                 # rows of interest are after warmup and over the scheduling period
                 mask = ~self.simulation_expost["warmup"] & \
@@ -347,6 +410,97 @@ class BuildingModel:
     @property
     def controlled_zone_names(self):
         return [z.name for z in self.zone_assets if z.controlled]
+
+    def get_w_and_b_from_rc_pickle(self, warm_start, target_name, SNR):
+        weights, biases = {}, {}
+        rcmodel = self.rcmodel
+        for z_i, zn in enumerate(self.zones_df_no_plenum["name"]):
+            weights[zn] = {}
+            biases[zn] = {}
+            if warm_start == "True" or "dfl" in warm_start:
+                try:  # check if there is alpha (spatial correlation) in the loaded model
+                    weights[zn]["alpha"] = {zzn:
+                                                       c.float_grad(rcmodel["alpha"][zz_i, z_i])
+                                                for zz_i, zzn in enumerate(self.zones_df_no_plenum["name"])}
+                except KeyError:  # if no alpha in the loaded model, do not read it
+                    pass
+                weights[zn]["R"] = c.float_grad(rcmodel["R"][0, z_i])
+                weights[zn]["C"] = c.float_grad(rcmodel["C"][0, z_i])
+                weights[zn]["h_eff"] = c.float_grad(rcmodel["heating_efficiency"][0, z_i])
+                weights[zn]["c_eff"] = c.float_grad(rcmodel["cooling_efficiency"][0, z_i])
+
+            elif warm_start == "False":
+                def rand_like(tensor):
+                    return c.float_grad(torch.rand_like(tensor))
+
+                def ones_like(tensor):
+                    return c.float_grad(torch.ones_like(tensor))
+
+                def alpha_like(tensor, target_name):
+                    uniform = rand_like(tensor) / 10
+                    if target_name == "Zone Mean Air Temperature(t+1)":
+                        uniform.masked_fill(torch.diag(torch.ones(uniform.shape[0])).bool(), 1)
+                    return uniform
+
+                try:  # check if there is alpha (spatial correlation) in the loaded model
+                    alpha = alpha_like(rcmodel["alpha"], target_name)
+                    weights[zn]["alpha"] = {zzn: alpha[zz_i, z_i]
+                                                for zz_i, zzn in enumerate(self.zones_df_no_plenum["name"])}
+                except KeyError:  # if no alpha in the loaded model, do not read it
+                    pass
+                weights[zn]["R"] = rand_like(rcmodel["R"][0, z_i]) * (21 - 5) + 5
+                weights[zn]["C"] = rand_like(rcmodel["C"][0, z_i]) * (21 - 5) + 5
+                weights[zn]["h_eff"] = ones_like(rcmodel["heating_efficiency"][0, z_i])
+                weights[zn]["c_eff"] = ones_like(rcmodel["cooling_efficiency"][0, z_i])
+
+            elif warm_start == "Noise":
+                def noise_like(tensor):
+                    return c.float_grad(tensor + torch.randn_like(tensor) * tensor / np.sqrt(SNR))
+
+                try:  # check if there is alpha (spatial correlation) in the loaded model
+                    weights[zn]["alpha"] = {zzn: noise_like(rcmodel["alpha"][zz_i, z_i])
+                                                for zz_i, zzn in enumerate(self.zones_df_no_plenum["name"])}
+                except KeyError:  # if no alpha in the loaded model, do not read it
+                    pass
+                weights[zn]["R"] = noise_like(rcmodel["R"][0, z_i])
+                weights[zn]["C"] = noise_like(rcmodel["C"][0, z_i])
+                weights[zn]["h_eff"] = noise_like(rcmodel["heating_efficiency"][0, z_i])
+                weights[zn]["c_eff"] = noise_like(rcmodel["cooling_efficiency"][0, z_i])
+
+            else:
+                raise ValueError("warm_start must be 'True' (or contain 'dfl' which is equivalent), 'False', 'Noise'")
+
+        return weights, biases
+
+
+    def get_w_and_b_from_onnx(self, warm_start, SNR, rg):
+        weights, biases = {}, {}
+        # read the nn from onnx
+        layers_onnx = list(self.nn.layers)
+        for l, layer_onnx in enumerate(layers_onnx):
+            if not isinstance(layer_onnx, InputLayer):
+                if warm_start == "True":
+                    # Set the values of the NN parameters from the onnx file IF weights and biases are not provided
+                    weights[l] = torch.tensor(layer_onnx.weights, requires_grad=rg, dtype=torch.float)
+                    biases[l] = torch.tensor(layer_onnx.biases, requires_grad=rg, dtype=torch.float)
+                elif warm_start == "False":
+                    weights[l] = torch.rand_like(torch.tensor(layer_onnx.weights, dtype=torch.float),
+                                                        requires_grad=rg)
+                    biases[l] = torch.rand_like(torch.tensor(layer_onnx.biases, dtype=torch.float),
+                                                requires_grad=rg)
+                elif warm_start == "Noise":
+                    # Set the values of the NN parameters from the onnx file + noise
+                    w = torch.tensor(layer_onnx.weights, requires_grad=rg, dtype=torch.float)
+                    b = torch.tensor(layer_onnx.biases, requires_grad=rg, dtype=torch.float)
+                    # noise is gaussian with std = 10% of the value of the parameter if SNR = 100
+                    noise_w = torch.randn_like(w) * w / np.sqrt(SNR)
+                    noise_b = torch.randn_like(b) * b / np.sqrt(SNR)
+                    weights[l] = w + noise_w
+                    biases[l] = b + noise_b
+                else:
+                    raise ValueError("warm_start must be 'True', 'False' or 'Noise'")
+
+        return weights, biases
 
 
 class Zone:
@@ -420,7 +574,7 @@ class Zone:
             # self.Tmax = pd.Series(index=bldg.simulation.index, data=29)
             # self.Tmin = pd.Series(index=bldg.simulation.index, data=16)
             self.hvac_capacity = bldg.simulation[f"Air System Electricity Energy,{self.acu}[Wh]"].max() / 1000
-            date = bldg.simulation[f"Air System Electricity Energy,{self.acu}[Wh]"].idxmax()
+            # date = bldg.simulation[f"Air System Electricity Energy,{self.acu}[Wh]"].idxmax()
             # print(f"Max HVAC capacity of {self.name} occurs on {date}")
 
     def set_target_temperature(self, Ttgt: pd.Series):

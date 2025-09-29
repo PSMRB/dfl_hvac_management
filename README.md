@@ -8,6 +8,8 @@ which serves as a constraint in the day-ahead HVAC scheduling process.
 The paper associated with this code is:
 https://arxiv.org/abs/2506.19717
 
+All the tables and plots associated with the paper can be found in the `output` folder.
+
 ## Requirements
 ### EnergyPlus
 To run the code, you need to have EnergyPlus 22-1-0 installed and set up on your system.
@@ -29,9 +31,11 @@ The code contains three main components:
 ### Paper Results
 To reproduce the results from the paper, you can run the following script:
 ```bash
-python PaperResults.py
+bash ReproducePaperResults.sh
 ```
-The tables of the paper can be found in 'output' folder.
+We recommend running this script in parallel on multiple cores to speed up the process.
+
+The tables of results can be found in 'output' folder.
 
 ### More results
 Below is a step-by-step guide to generate your own results.

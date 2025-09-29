@@ -67,3 +67,7 @@ class Stopwatch:
         if self.running:
             return self.elapsed_time + (time.time() - self.start_time)
         return self.elapsed_time
+
+    def add_elapsed_time(self, seconds):
+        """Add a specific amount of time to the elapsed time."""
+        self.elapsed_time += seconds

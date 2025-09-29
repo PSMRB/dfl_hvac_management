@@ -12,24 +12,37 @@ from src.DFLoptiTaskAndParams import create_parameter_list, manual_modification_
 from src.BuildSummary import build_summary
 
 
-# 1) Generate the datasets of the 6 zones small office model in Denver, CO, USA.
-main_generate_datasets()
-# 2) Train some machine learning models to predict the indoor temperature on historical data 1991-2020.
-main_indoor_temperature_modelling()
-# 3) Perform the clustering of the data to find the medoids.
-main_clustering()
+try:
+    n_tasks = int(sys.argv[1])
+    id_task = int(sys.argv[2])
+    n_jobs = -1
+except IndexError:  # not on the cluster
+    n_tasks = 1
+    id_task = 0
+    n_jobs = 1
 
-# 4) Create the parameter sets to run the DFLopti optimization.
-# create the list of parameter sets to run
-params_all = create_parameter_list()
-# Modify the parameters manually if needed to improve the performance of the training
-params_all = manual_modification_of_parameters(params_all)
-# Filter the parameters based on the parameters already run (successfully in summary.xlsx or failed in error_log)
-filtered_params = filter_params_wrapper(params_all, "data/SmallOffice/Models/cvxpylayer/summary.xlsx")
-# Split the parameters into chunks for parallel processing by the array job and save them to a file
-split_params(filtered_params, 1)
+if id_task == 0:
+    # # 1) Generate the datasets of the 6 zones small office model in Denver, CO, USA.
+    # main_generate_datasets()
+    # # 2) Train some machine learning models to predict the indoor temperature on historical data 1991-2020.
+    # main_indoor_temperature_modelling()
+    # # 3) Perform the clustering of the data to find the medoids.
+    # main_clustering()
+
+    # 4) Create the parameter sets to run the DFLopti optimization.
+    # create the list of parameter sets to run
+    params_all = create_parameter_list()
+    # Modify the parameters manually if needed to improve the performance of the training
+    params_all = manual_modification_of_parameters(params_all)
+    # Filter the parameters based on the parameters already run (successfully in summary.xlsx or failed in error_log)
+    filtered_params = filter_params_wrapper(params_all, "data/SmallOffice/Models/cvxpylayer/summary.xlsx")
+    # Split the parameters into chunks for parallel processing by the array job and save them to a file
+    split_params(filtered_params, n_tasks)
+else:
+    # wait for the file to be written
+    sleep(5)
 
 # 5) Run the DFLopti optimization in parallel
-parallel_dfl_training(0)
+parallel_dfl_training(id_task, n_jobs)
 # 6) Build the summary of the results
 build_summary()

@@ -7,7 +7,6 @@ import numpy as np
 
 from .Building import BuildingModel
 from .Common import getcolumnname, get_time, df_linear_interp
-from numpy import trunc
 import os
 import pandas as pd
 import sys
