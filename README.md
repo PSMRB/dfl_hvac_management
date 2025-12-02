@@ -1,3 +1,12 @@
+---
+title: HVAC Decision-Focused Learning Code
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: static
+license: mit
+---
+
 # Decision-Focused Learning (DFL) for HVAC Scheduling
 This repository contains code for implementing Decision-Focused Learning (DFL) to optimize HVAC scheduling in buildings.
 The DFL approach is used to learn a machine learning proxy (i.e., a neural network) that models the thermal dynamics of the building,
