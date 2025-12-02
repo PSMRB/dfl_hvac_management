@@ -163,22 +163,22 @@ class WrappedDataLoader:
 
 def loss_batch(model, loss_func, xb, yb, opt=None):
     yb_hat = model(xb)
-    metrics = {"mse": nn.MSELoss()(yb_hat, yb), "rmse": torch.sqrt(nn.MSELoss()(yb_hat, yb)),
+    losses = {"mse": nn.MSELoss()(yb_hat, yb), "rmse": torch.sqrt(nn.MSELoss()(yb_hat, yb)),
               "mae": nn.L1Loss()(yb_hat, yb), "mape": torch.mean(torch.abs((yb_hat - yb) / yb)) * 100,
               "r2": r2_score(yb_hat, yb), "std": torch.std(yb_hat - yb), "rstd": torch.std((yb_hat - yb) / yb)}
 
     if opt is not None:
-        metrics[loss_func].backward()
+        losses[loss_func].backward()
         opt.step()
         opt.zero_grad()
 
     # returns a copy of the tensor loss as a python number
-    for k, v in metrics.items():
-        metrics[k] = v.item()
+    for k, v in losses.items():
+        losses[k] = v.item()
 
     # get the actual batch size (the last batch may have a different size)
     actual_batch_size = len(xb.get(xb.keys().__iter__().__next__()))
-    return metrics, actual_batch_size
+    return losses, actual_batch_size
 
 
 def fit(hp, model, loss_func, opt, train_dl, val_dl):
