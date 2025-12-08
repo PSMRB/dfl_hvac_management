@@ -6,7 +6,9 @@ which serves as a constraint in the day-ahead HVAC scheduling process.
 ![DFL Overview](img/GraphicalAbstract.png)
 
 The paper associated with this code is:
-https://arxiv.org/abs/2506.19717
+* IEEE TSG: https://ieeexplore.ieee.org/document/11275968
+* ArXiv: https://arxiv.org/abs/2506.19717
+
 
 All the tables and plots associated with the paper can be found in the `output` folder.
 
